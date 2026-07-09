@@ -1,0 +1,8 @@
+# Goal
+string command       # pick | place
+string waypoint_id   # 航点 ID，如 pickup_a / drop_b
+---
+# Result
+bool success
+string message
+---
