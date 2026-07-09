@@ -39,7 +39,7 @@ DetectServerNode::DetectServerNode()
 
   const auto fallback_pose_values = declare_parameter<std::vector<double>>(
     "fallback_pose",
-    {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0});
+    {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0}); // xyz xyzw
   std::string fallback_pose_message;
   if (!makePoseFromVector(fallback_pose_values, fallback_pose_, fallback_pose_message)) {
     throw std::runtime_error("fallback_pose参数无效: " + fallback_pose_message);
