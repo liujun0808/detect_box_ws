@@ -65,7 +65,6 @@ detect_pkg/
 ├── package.xml
 ├── README.md
 ├── include/detect_pkg/detect.h
-├── launch/detect_with_realsense.launch.py
 └── src/
     ├── detect_sever_node.cpp
     └── detect_client_node.cpp
@@ -79,20 +78,11 @@ ROS2 包依赖：
 - `sensor_msgs`
 - `geometry_msgs`
 - `upper_limb_interface`
-- `realsense2_camera`
-- `launch`
-- `launch_ros`
 
 系统/第三方库依赖：
 
-- OpenCV，包含 `aruco`、`calib3d`、`highgui`、`imgcodecs`
+- OpenCV，包含 `aruco`、`calib3d`、`imgcodecs`
 - Eigen3
-
-安装 RealSense ROS2 驱动：
-
-```bash
-sudo apt install ros-humble-realsense2-camera
-```
 
 ## 编译
 
@@ -103,59 +93,26 @@ colcon build --packages-select upper_limb_interface detect_pkg
 source install/setup.bash
 ```
 
-## 启动
+## 启动模式
 
-在mujoco环境中，仿真环境启动后，先启动仿真相机：
+检测服务与相机发布节点分离。相机节点负责发布彩色图像和相机内参，`detect_server_node` 通过订阅对应 topic 获取最新图像，不负责启动或管理相机。
 
-```bash
-ros2 launch mujoco_d435_publisher d435_camera_publisher.launch.py
-```
-再另开一个终端启动检测服务：
+在 MuJoCo 或实机环境中，先由相机包启动图像发布，再另开一个终端启动检测服务：
 
 ```bash
 ros2 run detect_pkg detect_server_node
 ```
 
-(仅限有实际相机才可使用)，使用 launch 同时启动相机驱动和检测服务：
+## 相机数据来源
 
-```bash
-ros2 launch detect_pkg detect_with_realsense.launch.py
-```
-## RealSense 启动配置
-
-`detect_with_realsense.launch.py` 默认启动官方 `realsense2_camera` 驱动，并使用如下配置：
-
-```text
-enable_color: true
-enable_depth: false
-enable_infra1: false
-enable_infra2: false
-rgb_camera.color_profile: 640x480x15
-```
-
-默认关闭深度图和红外图，只保留彩色图像。彩色图像默认使用 `640x480x15`，原因是 D435 在 USB 供电不稳定或总线带宽不足时，高分辨率、高帧率、多数据流同时传输容易导致相机传输失败。现场使用时建议使用外部供电的 USB 3.0 扩展坞，避免相机掉帧或取流失败。
-
-如需调整彩色图像规格：
-
-```bash
-ros2 launch detect_pkg detect_with_realsense.launch.py color_profile:=640x480x30
-```
-
-## Topic 约定
-
-检测服务端默认订阅：
+检测节点只依赖 ROS topic，不直接依赖 RealSense SDK。默认订阅：
 
 ```text
 /camera/camera/color/image_raw
 /camera/camera/color/camera_info
 ```
 
-有实际相机时，可通过 launch 参数覆盖：
-```bash
-ros2 launch detect_pkg detect_with_realsense.launch.py \
-  image_topic:=/camera/camera/color/image_raw \
-  camera_info_topic:=/camera/camera/color/camera_info
-```
+相机发布者可以是 MuJoCo 仿真相机、`d435_publisher` 中封装的 RealSense 启动文件，或其他兼容 `sensor_msgs/msg/Image` 与 `sensor_msgs/msg/CameraInfo` 的节点。
 
 服务端目前支持的图像编码：
 
@@ -185,23 +142,23 @@ geometry_msgs/Pose box_pose
 - `capture_once`：触发一次检测。当前服务端不区分该字段真假，收到请求即使用最近缓存图像进行检测。
 - `success`：是否成功估计到 box 位姿。
 - `message`：检测结果说明或错误原因。
-- `box_pose`：box 坐标系在 `base_link` 坐标系下的位姿。服务端内部先估计 `box2camera`，再使用 `camera2base` 外参转换到 `base_link`。失败时返回单位位姿：
+- `box_pose`：box 坐标系在 `base_link` 坐标系下的位姿。服务端内部先估计 `box2camera`，再使用 `camera2base` 外参转换到 `base_link`。失败时返回服务端参数 `fallback_pose` 指定的位姿，格式为 `[x, y, z, qx, qy, qz, qw]`。默认值为：
 
 ```text
 position = [0, 0, 0]
 orientation = [0, 0, 0, 1]
 ```
 
+运行时可随时修改失败返回位姿：
+
+```bash
+ros2 param set /detect_server_node fallback_pose "[0.30, 0.00, 0.12, 0.0, 0.0, 0.0, 1.0]"
+```
+
 服务名默认：
 
 ```text
 /detect
-```
-
-可通过参数修改：
-
-```bash
-ros2 launch detect_pkg detect_with_realsense.launch.py service_name:=detect
 ```
 
 ## 测试客户端
@@ -255,14 +212,16 @@ tag_size_m: 0.0625
 box_tag_ids: [10, 24]
 box_tag_positions_m: [-0.041, 0.075, 0.0, -0.041, -0.003, 0.0]
 box_tag_rotations_row_major: [1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1]
-enable_debug_image: false
-debug_window_name: AprilTag Detection
 debug_image_save_prefix: apriltag_detection
+debug_image_save_dir: debug_img
+fallback_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 ```
 
-其中 `service_name`、`image_topic`、`camera_info_topic`、`enable_debug_image` 由 `detect_with_realsense.launch.py` 暴露为启动参数。
+这些参数由 `detect_server_node` 自身声明，可在节点启动时或运行时通过 ROS2 参数机制配置。
 
-`tag_size_m`、`box_tag_ids`、`box_tag_positions_m`、`box_tag_rotations_row_major`、`debug_window_name`、`debug_image_save_prefix` 属于检测算法和标定相关的内部参数，当前不通过 launch 文件配置。如需修改，请在 `detect_sever_node.cpp` 的构造函数默认值中调整，并重新编译。
+`fallback_pose` 可通过 `ros2 param set` 在节点运行时修改。四元数会自动归一化；参数必须包含 7 个有限数值。
+
+`tag_size_m`、`box_tag_ids`、`box_tag_positions_m`、`box_tag_rotations_row_major`、`debug_image_save_prefix` 属于检测算法和标定相关的内部参数，当前不通过 launch 文件配置。如需修改，请在 `detect_sever_node.cpp` 的构造函数默认值中调整，并重新编译。
 
 `tag_size_m` 表示 OpenCV 实际识别的黑色 AprilTag 方框边长，单位为米，必须与图案黑色外边框一致。当前 MuJoCo 资产的 mesh 边长是 0.08 m，但其 PNG 纹理有白边，黑色方框占 400/512，因此默认值为 `0.08 * 400 / 512 = 0.0625 m`。
 
@@ -273,32 +232,23 @@ debug_image_save_prefix: apriltag_detection
 `box_tag_rotations_row_major` 表示每个 tag 坐标系相对 box 坐标系的旋转矩阵 `R_box_tag`，按每个矩阵 9 个元素的行优先顺序排列：`[r00, r01, r02, r10, r11, r12, r20, r21, r22, ...]`。矩阵将 tag 坐标系中的向量转换到 box 坐标系，必须满足 `R^T R = I` 和 `det(R) = 1`。默认值为两个单位矩阵，分别对应 tag 10 和 tag 24。
 
 
-## 调试图像
+## 检测图像保存
 
-开启：
+服务端收到检测请求并成功获取图像后，会将本次识别画面保存到 `debug_image_save_dir`。当前没有 OpenCV 调试窗口显示逻辑。
 
-```bash
-ros2 launch detect_pkg detect_with_realsense.launch.py enable_debug_image:=true
-```
-
-开启后服务端会：
-
-- 显示 OpenCV 图像窗口。
 - 绘制 AprilTag 边框和 ID。
 - 绘制 tag 坐标轴。
-- 在图像左上角绘制检测状态文字。
-- 服务返回后保存一张调试图像到节点运行目录。
+- 在图像左上角绘制检测状态文字；检测成功时包含识别到的 tag id、用于定位的 box tag id 和 box 平移结果。
+- 服务返回后保存图像到 `debug_image_save_dir`。
+
+默认保存目录为 `debug_img`。文件名包含时间戳，不会覆盖历史结果。
 
 保存文件名示例：
 
 ```text
-apriltag_detection_success_1781663537802474571.png
-apriltag_detection_failed_1781663537802474571.png
+debug_img/apriltag_detection_success_1781663537802474571.png
+debug_img/apriltag_detection_failed_1781663537802474571.png
 ```
-
-如需修改调试窗口名或保存文件名前缀，请在源码中调整 `debug_window_name` 或 `debug_image_save_prefix` 默认值，并重新编译。
-
-注意：调试窗口需要图形桌面环境。如果通过 SSH 或无显示环境运行，建议关闭 `enable_debug_image`。
 
 ## 常见问题
 

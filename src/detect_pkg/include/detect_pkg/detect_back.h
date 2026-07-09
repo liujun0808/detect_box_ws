@@ -60,7 +60,7 @@ private:
     const cv::Matx33d & rotation_camera_tag,
     const cv::Vec3d & translation_camera_tag) const;
 
-  void showAndSaveDebugImage(const cv::Mat & debug_image, bool success);
+  void saveDebugImage(const cv::Mat & debug_image, bool success);
   void drawDebugStatus(cv::Mat & debug_image, const std::string & text) const;
   geometry_msgs::msg::Pose identityPose() const;
 
@@ -81,10 +81,8 @@ private:
   std::string image_topic_;
   std::string camera_info_topic_;
   std::string image_qos_;
-  std::string debug_window_name_;
   std::string debug_image_save_prefix_;
   double tag_size_m_;
-  bool enable_debug_image_;
   Eigen::Matrix4d camera2base_;
 };
 

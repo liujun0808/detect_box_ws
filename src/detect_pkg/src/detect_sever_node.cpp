@@ -1,10 +1,13 @@
 #include "detect_pkg/detect.h"
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <exception>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 namespace detect_pkg
 {
@@ -19,12 +22,11 @@ DetectServerNode::DetectServerNode()
   camera_info_topic_(
     declare_parameter<std::string>("camera_info_topic", "/camera/camera/color/camera_info")),
   image_qos_(declare_parameter<std::string>("image_qos", "reliable")),
-  debug_window_name_(declare_parameter<std::string>("debug_window_name", "AprilTag Detection")),
   debug_image_save_prefix_(declare_parameter<std::string>("debug_image_save_prefix", "apriltag_detection")),
+  debug_image_save_dir_(declare_parameter<std::string>("debug_image_save_dir", "debug_img")),
   tag_size_m_(declare_parameter<double>("tag_size_m", 0.08)),
   max_detection_attempts_(declare_parameter<int>("max_detection_attempts", 5)),
-  new_frame_timeout_ms_(declare_parameter<int>("new_frame_timeout_ms", 1000)),
-  enable_debug_image_(declare_parameter<bool>("enable_debug_image", false))
+  new_frame_timeout_ms_(declare_parameter<int>("new_frame_timeout_ms", 1000))
 {
   if (max_detection_attempts_ < 1) {
     RCLCPP_WARN(get_logger(), "max_detection_attempts=%d无效，已改为1", max_detection_attempts_);
@@ -35,12 +37,22 @@ DetectServerNode::DetectServerNode()
     new_frame_timeout_ms_ = 1;
   }
 
-    const auto box_tag_ids = declare_parameter<std::vector<int64_t>>("box_tag_ids", {10,24});
+  const auto fallback_pose_values = declare_parameter<std::vector<double>>(
+    "fallback_pose",
+    {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0});
+  std::string fallback_pose_message;
+  if (!makePoseFromVector(fallback_pose_values, fallback_pose_, fallback_pose_message)) {
+    throw std::runtime_error("fallback_pose参数无效: " + fallback_pose_message);
+  }
+  parameter_callback_handle_ = add_on_set_parameters_callback(
+    std::bind(&DetectServerNode::onParametersSet, this, std::placeholders::_1));
+
+  const auto box_tag_ids = declare_parameter<std::vector<int64_t>>("box_tag_ids", {10, 24});
 
   const auto box_tag_positions_m = declare_parameter<std::vector<double>>(
     "box_tag_positions_m",
     // {-0.1275,0.103,-0.0025, -0.1275, 0.0, -0.0025}); // 后表面 0.08
-     {-0.1005, 0.16, 0.01, -0.1005, -0.16, -0.01}); // mujoco 仿真
+    {-0.1005, 0.16, 0.01, -0.1005, -0.16, -0.01}); // mujoco 仿真
   const auto box_tag_rotations_row_major = declare_parameter<std::vector<double>>(
     "box_tag_rotations_row_major",
     {
@@ -153,14 +165,14 @@ DetectServerNode::DetectServerNode()
             0.000000,  0.000000,  0.000000,  1.000000;
   RCLCPP_INFO(
     get_logger(),
-    "AprilTag检测服务已启动: %s, image_topic=%s, camera_info_topic=%s, image_qos=%s, tag_size_m=%.4f, box_tag_count=%zu, enable_debug_image=%s",
+    "AprilTag检测服务已启动: %s, image_topic=%s, camera_info_topic=%s, image_qos=%s, tag_size_m=%.4f, box_tag_count=%zu, debug_image_save_dir=%s",
     service_name_.c_str(),
     image_topic_.c_str(),
     camera_info_topic_.c_str(),
     image_qos_.c_str(),
     tag_size_m_,
     tag_poses_in_box_.size(),
-    enable_debug_image_ ? "true" : "false");
+    debug_image_save_dir_.c_str());
 }
 
 void DetectServerNode::imageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
@@ -218,7 +230,7 @@ void DetectServerNode::handleDetectRequest(
 {
   (void)request;
 
-  response->box_pose = identityPose();
+  response->box_pose = fallbackPose();
   response->success = false;
 
   uint64_t last_used_frame_id = 0;
@@ -249,13 +261,13 @@ void DetectServerNode::handleDetectRequest(
     }
     last_used_frame_id = captured_frame_id;
 
-    geometry_msgs::msg::Pose box_pose = identityPose();
+    geometry_msgs::msg::Pose box_pose = fallbackPose();
     cv::Mat debug_image;
     if (!detectBoxPose(color_image, camera_info, box_pose, debug_image, message)) {
       std::ostringstream oss;
       oss << "第" << attempt << "/" << max_detection_attempts_ << "次识别失败: " << message;
       last_failure_message = oss.str();
-      showAndSaveDebugImage(debug_image, false);
+      saveDebugImage(debug_image, false);
       RCLCPP_WARN(get_logger(), "%s", last_failure_message.c_str());
       continue;
     }
@@ -266,10 +278,10 @@ void DetectServerNode::handleDetectRequest(
       oss << "第" << attempt << "/" << max_detection_attempts_ << "次position检查失败: "
           << validation_message;
       last_failure_message = oss.str();
-      if (enable_debug_image_ && !debug_image.empty()) {
+      if (!debug_image.empty()) {
         drawDebugStatus(debug_image, last_failure_message);
       }
-      showAndSaveDebugImage(debug_image, false);
+      saveDebugImage(debug_image, false);
       RCLCPP_WARN(get_logger(), "%s", last_failure_message.c_str());
       continue;
     }
@@ -281,7 +293,7 @@ void DetectServerNode::handleDetectRequest(
     response->message = success_message.str();
     response->box_pose = box_pose;
 
-    showAndSaveDebugImage(debug_image, true);
+    saveDebugImage(debug_image, true);
     RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
     return;
   }
@@ -290,6 +302,7 @@ void DetectServerNode::handleDetectRequest(
   final_message << "检测失败: 已尝试" << max_detection_attempts_
                 << "次，最后一次结果: " << last_failure_message;
   response->message = final_message.str();
+  response->box_pose = fallbackPose();
   RCLCPP_WARN(get_logger(), "%s", response->message.c_str());
 }
 
@@ -375,14 +388,12 @@ bool DetectServerNode::detectBoxPose(
   std::string & message) const
 {
   if (color_image.empty()) {
-    message = "彩色图像为空，返回单位位姿";
+    message = "彩色图像为空，返回fallback_pose";
     return false;
   }
 
   try {
-    if (enable_debug_image_) {
-      debug_image = color_image.clone();
-    }
+    debug_image = color_image.clone();
 
     cv::Mat gray_image;
     cv::cvtColor(color_image, gray_image, cv::COLOR_BGR2GRAY);
@@ -397,15 +408,25 @@ bool DetectServerNode::detectBoxPose(
       ids,
       detector_parameters_);
 
+    std::ostringstream detected_ids_text;
+    detected_ids_text << "detected ids=[";
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      if (i > 0) {
+        detected_ids_text << ", ";
+      }
+      detected_ids_text << ids[i];
+    }
+    detected_ids_text << "]";
+
     if (ids.empty()) {
-      message = "未识别到DICT_APRILTAG_36h11码，返回单位位姿";
-      if (enable_debug_image_) {
-        drawDebugStatus(debug_image, message);
+      message = "未识别到DICT_APRILTAG_36h11码，返回fallback_pose";
+      if (!debug_image.empty()) {
+        drawDebugStatus(debug_image, "failed: no DICT_APRILTAG_36h11 tag");
       }
       return false;
     }
 
-    if (enable_debug_image_) {
+    if (!debug_image.empty()) {
       // 绘制所有被 OpenCV 识别出的 AprilTag 边框和 ID，包含不属于当前 box 的 tag。
       cv::aruco::drawDetectedMarkers(debug_image, corners, ids);
     }
@@ -426,14 +447,14 @@ bool DetectServerNode::detectBoxPose(
       translation_vectors);
 
     if (rotation_vectors.empty() || translation_vectors.empty()) {
-      message = "AprilTag位姿估计失败，返回单位位姿";
-      if (enable_debug_image_) {
-        drawDebugStatus(debug_image, message);
+      message = "AprilTag位姿估计失败，返回fallback_pose";
+      if (!debug_image.empty()) {
+        drawDebugStatus(debug_image, detected_ids_text.str() + "; pose estimation failed");
       }
       return false;
     }
 
-    if (enable_debug_image_) {
+    if (!debug_image.empty()) {
       for (std::size_t i = 0; i < rotation_vectors.size(); ++i) {
         // 在每个 tag 上绘制估计出的局部坐标轴，轴长取 tag 边长的一半，便于观察姿态方向。
         cv::drawFrameAxes(
@@ -502,9 +523,9 @@ bool DetectServerNode::detectBoxPose(
     }
 
     if (box_rotation_candidates.empty()) {
-      message = "识别到AprilTag，但未匹配到用于定位box的tag id，返回单位位姿";
-      if (enable_debug_image_) {
-        drawDebugStatus(debug_image, message);
+      message = "识别到AprilTag，但未匹配到用于定位box的tag id，返回fallback_pose";
+      if (!debug_image.empty()) {
+        drawDebugStatus(debug_image, detected_ids_text.str() + "; no configured box tag matched");
       }
       return false;
     }
@@ -513,12 +534,17 @@ bool DetectServerNode::detectBoxPose(
 
     std::ostringstream oss;
     oss << "使用" << matched_tag_ids.size() << "个AprilTag定位box, ids=[";
+    std::ostringstream matched_ids_text;
+    matched_ids_text << "matched box ids=[";
     for (std::size_t i = 0; i < matched_tag_ids.size(); ++i) {
       if (i > 0) {
         oss << ", ";
+        matched_ids_text << ", ";
       }
       oss << matched_tag_ids[i];
+      matched_ids_text << matched_tag_ids[i];
     }
+    matched_ids_text << "]";
     oss << "], box_t=["
         << box_pose.position.x << ", "
         << box_pose.position.y << ", "
@@ -526,19 +552,25 @@ bool DetectServerNode::detectBoxPose(
         <<"box_ori=["
         <<box_pose.orientation.x<<box_pose.orientation.y<<box_pose.orientation.z<<box_pose.orientation.w<< "];";
     message = oss.str();
-    if (enable_debug_image_) {
-      drawDebugStatus(debug_image, message);
+    if (!debug_image.empty()) {
+      std::ostringstream status_text;
+      status_text << detected_ids_text.str() << "; " << matched_ids_text.str()
+                  << "; box_t=[" << std::fixed << std::setprecision(3)
+                  << box_pose.position.x << ", "
+                  << box_pose.position.y << ", "
+                  << box_pose.position.z << "]";
+      drawDebugStatus(debug_image, status_text.str());
     }
     return true;
   } catch (const cv::Exception & error) {
-    message = std::string("OpenCV检测异常: ") + error.what() + "，返回单位位姿";
-    if (enable_debug_image_ && !debug_image.empty()) {
+    message = std::string("OpenCV检测异常: ") + error.what() + "，返回fallback_pose";
+    if (!debug_image.empty()) {
       drawDebugStatus(debug_image, message);
     }
     return false;
   } catch (const std::exception & error) {
-    message = std::string("AprilTag检测异常: ") + error.what() + "，返回单位位姿";
-    if (enable_debug_image_ && !debug_image.empty()) {
+    message = std::string("AprilTag检测异常: ") + error.what() + "，返回fallback_pose";
+    if (!debug_image.empty()) {
       drawDebugStatus(debug_image, message);
     }
     return false;
@@ -705,21 +737,18 @@ bool DetectServerNode::validateBoxPosePosition(
   return false;
 }
 
-void DetectServerNode::showAndSaveDebugImage(const cv::Mat & debug_image, bool success)
+void DetectServerNode::saveDebugImage(const cv::Mat & debug_image, bool success)
 {
-  if (!enable_debug_image_ || debug_image.empty()) {
+  if (debug_image.empty()) {
     return;
   }
 
   try {
-    // waitKey(1) 让 OpenCV 窗口刷新但不阻塞服务回调；下一次请求会继续更新同一个窗口。
-    cv::imshow(debug_window_name_, debug_image);
-    cv::waitKey(1);
+    if (!ensureDebugImageSaveDir()) {
+      return;
+    }
 
-    const std::string file_name =
-      debug_image_save_prefix_ + "_" +
-      (success ? "success_" : "failed_") +
-      std::to_string(now().nanoseconds()) + ".png";
+    const std::string file_name = buildDebugImagePath(success);
 
     if (cv::imwrite(file_name, debug_image)) {
       RCLCPP_INFO(get_logger(), "已保存AprilTag调试图像: %s", file_name.c_str());
@@ -727,8 +756,72 @@ void DetectServerNode::showAndSaveDebugImage(const cv::Mat & debug_image, bool s
       RCLCPP_WARN(get_logger(), "保存AprilTag调试图像失败: %s", file_name.c_str());
     }
   } catch (const cv::Exception & error) {
-    RCLCPP_WARN(get_logger(), "显示或保存AprilTag调试图像失败: %s", error.what());
+    RCLCPP_WARN(get_logger(), "保存AprilTag调试图像失败: %s", error.what());
   }
+}
+
+bool DetectServerNode::ensureDebugImageSaveDir() const
+{
+  if (debug_image_save_dir_.empty()) {
+    RCLCPP_WARN(get_logger(), "debug_image_save_dir为空，无法保存AprilTag调试图像");
+    return false;
+  }
+
+  std::string normalized_dir = debug_image_save_dir_;
+  while (normalized_dir.size() > 1 && normalized_dir.back() == '/') {
+    normalized_dir.pop_back();
+  }
+
+  std::size_t search_pos = normalized_dir[0] == '/' ? 1 : 0;
+  while (true) {
+    const std::size_t slash_pos = normalized_dir.find('/', search_pos);
+    const std::string partial_dir =
+      slash_pos == std::string::npos ? normalized_dir : normalized_dir.substr(0, slash_pos);
+
+    if (!partial_dir.empty()) {
+      struct stat path_stat;
+      if (stat(partial_dir.c_str(), &path_stat) != 0) {
+        if (mkdir(partial_dir.c_str(), 0755) != 0 && errno != EEXIST) {
+          RCLCPP_WARN(
+            get_logger(),
+            "创建AprilTag调试图像目录失败: %s",
+            partial_dir.c_str());
+          return false;
+        }
+      } else if (!S_ISDIR(path_stat.st_mode)) {
+        RCLCPP_WARN(
+          get_logger(),
+          "AprilTag调试图像保存路径不是目录: %s",
+          partial_dir.c_str());
+        return false;
+      }
+    }
+
+    if (slash_pos == std::string::npos) {
+      break;
+    }
+    search_pos = slash_pos + 1;
+  }
+
+  return true;
+}
+
+std::string DetectServerNode::buildDebugImagePath(bool success) const
+{
+  std::string normalized_dir = debug_image_save_dir_;
+  while (normalized_dir.size() > 1 && normalized_dir.back() == '/') {
+    normalized_dir.pop_back();
+  }
+
+  const std::string file_name =
+    debug_image_save_prefix_ + "_" +
+    (success ? "success_" : "failed_") +
+    std::to_string(now().nanoseconds()) + ".png";
+
+  if (normalized_dir.empty() || normalized_dir == ".") {
+    return file_name;
+  }
+  return normalized_dir + "/" + file_name;
 }
 
 void DetectServerNode::drawDebugStatus(cv::Mat & debug_image, const std::string & text) const
@@ -759,17 +852,96 @@ void DetectServerNode::drawDebugStatus(cv::Mat & debug_image, const std::string 
     cv::LINE_AA);
 }
 
-geometry_msgs::msg::Pose DetectServerNode::identityPose() const
+geometry_msgs::msg::Pose DetectServerNode::fallbackPose() const
 {
-  geometry_msgs::msg::Pose pose;
-  pose.position.x = 0.0;
-  pose.position.y = 0.0;
-  pose.position.z = 0.0;
-  pose.orientation.x = 0.0;
-  pose.orientation.y = 0.0;
-  pose.orientation.z = 0.0;
-  pose.orientation.w = 1.0;
-  return pose;
+  std::lock_guard<std::mutex> lock(fallback_pose_mutex_);
+  return fallback_pose_;
+}
+
+bool DetectServerNode::makePoseFromVector(
+  const std::vector<double> & values,
+  geometry_msgs::msg::Pose & pose,
+  std::string & message) const
+{
+  if (values.size() != 7) {
+    std::ostringstream oss;
+    oss << "需要7个数 [x, y, z, qx, qy, qz, qw]，实际为" << values.size();
+    message = oss.str();
+    return false;
+  }
+
+  for (double value : values) {
+    if (!std::isfinite(value)) {
+      message = "不能包含NaN或Inf";
+      return false;
+    }
+  }
+
+  const double qx = values[3];
+  const double qy = values[4];
+  const double qz = values[5];
+  const double qw = values[6];
+  const double quaternion_norm = std::sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+  if (quaternion_norm < 1e-9) {
+    message = "四元数模长不能为0";
+    return false;
+  }
+
+  pose.position.x = values[0];
+  pose.position.y = values[1];
+  pose.position.z = values[2];
+  pose.orientation.x = qx / quaternion_norm;
+  pose.orientation.y = qy / quaternion_norm;
+  pose.orientation.z = qz / quaternion_norm;
+  pose.orientation.w = qw / quaternion_norm;
+  message = "fallback_pose参数有效";
+  return true;
+}
+
+rcl_interfaces::msg::SetParametersResult DetectServerNode::onParametersSet(
+  const std::vector<rclcpp::Parameter> & parameters)
+{
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = true;
+
+  bool has_fallback_pose_update = false;
+  geometry_msgs::msg::Pose updated_fallback_pose;
+
+  for (const auto & parameter : parameters) {
+    if (parameter.get_name() != "fallback_pose") {
+      continue;
+    }
+
+    std::vector<double> values;
+    if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY) {
+      values = parameter.as_double_array();
+    } else if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER_ARRAY) {
+      const auto integer_values = parameter.as_integer_array();
+      values.reserve(integer_values.size());
+      for (const auto integer_value : integer_values) {
+        values.push_back(static_cast<double>(integer_value));
+      }
+    } else {
+      result.successful = false;
+      result.reason = "fallback_pose必须是7元素数组 [x, y, z, qx, qy, qz, qw]";
+      return result;
+    }
+
+    std::string message;
+    if (!makePoseFromVector(values, updated_fallback_pose, message)) {
+      result.successful = false;
+      result.reason = "fallback_pose参数无效: " + message;
+      return result;
+    }
+    has_fallback_pose_update = true;
+  }
+
+  if (has_fallback_pose_update) {
+    std::lock_guard<std::mutex> lock(fallback_pose_mutex_);
+    fallback_pose_ = updated_fallback_pose;
+  }
+
+  return result;
 }
 
 }  // namespace detect_pkg

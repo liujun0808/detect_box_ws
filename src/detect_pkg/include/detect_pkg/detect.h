@@ -15,10 +15,10 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
-#include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/aruco.hpp>
 
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
@@ -105,20 +105,37 @@ private:
     const geometry_msgs::msg::Pose & box_pose,
     std::string & message) const;
 
-  // 在调试开关打开时显示并保存带识别结果的图像。
-  void showAndSaveDebugImage(const cv::Mat & debug_image, bool success);
+  // 保存带识别结果的图像。
+  void saveDebugImage(const cv::Mat & debug_image, bool success);
+
+  // 确保调试图像保存目录存在。
+  bool ensureDebugImageSaveDir() const;
+
+  // 拼接调试图像保存路径。
+  std::string buildDebugImagePath(bool success) const;
 
   // 在图像左上角绘制本次检测的状态文字。
   void drawDebugStatus(cv::Mat & debug_image, const std::string & text) const;
 
-  // 生成单位位姿，用于未识别到 tag 或异常错误时返回给客户端。
-  geometry_msgs::msg::Pose identityPose() const;
+  // 生成失败时返回给客户端的可配置位姿。
+  geometry_msgs::msg::Pose fallbackPose() const;
+
+  // 从 [x, y, z, qx, qy, qz, qw] 参数生成 Pose。
+  bool makePoseFromVector(
+    const std::vector<double> & values,
+    geometry_msgs::msg::Pose & pose,
+    std::string & message) const;
+
+  // 校验并应用运行时 fallback_pose 参数更新。
+  rcl_interfaces::msg::SetParametersResult onParametersSet(
+    const std::vector<rclcpp::Parameter> & parameters);
 
   rclcpp::Service<DetectAprilTag>::SharedPtr service_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_subscription_;
   rclcpp::CallbackGroup::SharedPtr service_callback_group_;
   rclcpp::CallbackGroup::SharedPtr camera_callback_group_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
 
   // 订阅缓存：服务回调只读取最近一帧，避免服务端直接依赖 RealSense SDK。
   mutable std::mutex camera_data_mutex_;
@@ -138,14 +155,15 @@ private:
   std::string image_topic_;
   std::string camera_info_topic_;
   std::string image_qos_;
-  std::string debug_window_name_;
   std::string debug_image_save_prefix_;
+  std::string debug_image_save_dir_;
   double tag_size_m_;
   int max_detection_attempts_;
   int new_frame_timeout_ms_;
   std::map<int32_t, TagPoseInBox> tag_poses_in_box_;
-  bool enable_debug_image_;
   Eigen::Matrix4d camera2base;
+  mutable std::mutex fallback_pose_mutex_;
+  geometry_msgs::msg::Pose fallback_pose_;
 };
 
 }  // namespace detect_pkg

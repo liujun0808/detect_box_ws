@@ -4,4 +4,4 @@ bool capture_once        # 触发一次相机采集和 AprilTag 检测
 # Response
 bool success             # 是否成功识别到 AprilTag
 string message           # 检测结果或错误信息
-geometry_msgs/Pose box_pose # box 坐标系在 base_link 坐标系下的位姿，失败时为单位位姿
+geometry_msgs/Pose box_pose # box 坐标系在 base_link 坐标系下的位姿，失败时为服务端fallback_pose参数
