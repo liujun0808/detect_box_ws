@@ -1,7 +1,11 @@
 #include "detect_pkg/detect.h"
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
+#include <dirent.h>
 #include <exception>
 #include <iomanip>
 #include <sstream>
@@ -752,6 +756,7 @@ void DetectServerNode::saveDebugImage(const cv::Mat & debug_image, bool success)
 
     if (cv::imwrite(file_name, debug_image)) {
       RCLCPP_INFO(get_logger(), "已保存AprilTag调试图像: %s", file_name.c_str());
+      pruneDebugImages(10);
     } else {
       RCLCPP_WARN(get_logger(), "保存AprilTag调试图像失败: %s", file_name.c_str());
     }
@@ -822,6 +827,79 @@ std::string DetectServerNode::buildDebugImagePath(bool success) const
     return file_name;
   }
   return normalized_dir + "/" + file_name;
+}
+
+void DetectServerNode::pruneDebugImages(std::size_t max_image_count) const
+{
+  std::string normalized_dir = debug_image_save_dir_;
+  while (normalized_dir.size() > 1 && normalized_dir.back() == '/') {
+    normalized_dir.pop_back();
+  }
+  if (normalized_dir.empty() || normalized_dir == ".") {
+    normalized_dir = ".";
+  }
+
+  DIR * dir = opendir(normalized_dir.c_str());
+  if (dir == nullptr) {
+    RCLCPP_WARN(
+      get_logger(),
+      "打开AprilTag调试图像目录失败，无法清理旧图像: %s",
+      normalized_dir.c_str());
+    return;
+  }
+
+  struct DebugImageFile
+  {
+    std::string path;
+    std::time_t modified_time;
+  };
+  std::vector<DebugImageFile> image_files;
+
+  const std::string expected_prefix = debug_image_save_prefix_ + "_";
+  while (dirent * entry = readdir(dir)) {
+    const std::string file_name(entry->d_name);
+    if (file_name == "." || file_name == "..") {
+      continue;
+    }
+    if (file_name.rfind(expected_prefix, 0) != 0) {
+      continue;
+    }
+    if (file_name.size() < 4 || file_name.substr(file_name.size() - 4) != ".png") {
+      continue;
+    }
+
+    const std::string file_path =
+      normalized_dir == "." ? file_name : normalized_dir + "/" + file_name;
+    struct stat file_stat;
+    if (stat(file_path.c_str(), &file_stat) != 0 || !S_ISREG(file_stat.st_mode)) {
+      continue;
+    }
+    image_files.push_back(DebugImageFile{file_path, file_stat.st_mtime});
+  }
+  closedir(dir);
+
+  if (image_files.size() <= max_image_count) {
+    return;
+  }
+
+  std::sort(
+    image_files.begin(),
+    image_files.end(),
+    [](const DebugImageFile & lhs, const DebugImageFile & rhs) {
+      if (lhs.modified_time != rhs.modified_time) {
+        return lhs.modified_time > rhs.modified_time;
+      }
+      return lhs.path > rhs.path;
+    });
+
+  for (std::size_t i = max_image_count; i < image_files.size(); ++i) {
+    if (std::remove(image_files[i].path.c_str()) != 0) {
+      RCLCPP_WARN(
+        get_logger(),
+        "删除旧AprilTag调试图像失败: %s",
+        image_files[i].path.c_str());
+    }
+  }
 }
 
 void DetectServerNode::drawDebugStatus(cv::Mat & debug_image, const std::string & text) const

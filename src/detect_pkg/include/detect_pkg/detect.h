@@ -114,6 +114,9 @@ private:
   // 拼接调试图像保存路径。
   std::string buildDebugImagePath(bool success) const;
 
+  // 只保留调试图像目录中最新的 max_image_count 张检测图。
+  void pruneDebugImages(std::size_t max_image_count) const;
+
   // 在图像左上角绘制本次检测的状态文字。
   void drawDebugStatus(cv::Mat & debug_image, const std::string & text) const;
 
