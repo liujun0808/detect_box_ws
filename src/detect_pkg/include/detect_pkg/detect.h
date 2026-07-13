@@ -32,6 +32,8 @@ namespace detect_pkg
 class DetectServerNode : public rclcpp::Node
 {
 public:
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
   DetectServerNode();
   ~DetectServerNode() override = default;
 

@@ -55,8 +55,8 @@ DetectServerNode::DetectServerNode()
 
   const auto box_tag_positions_m = declare_parameter<std::vector<double>>(
     "box_tag_positions_m",
-    // {-0.1275,0.103,-0.0025, -0.1275, 0.0, -0.0025}); // 后表面 0.08
-    {-0.1005, 0.16, 0.01, -0.1005, -0.16, -0.01}); // mujoco 仿真
+    {-0.1475, 0.1255, -0.0305, 0.0, 0.0, 0.00}); // 后表面 0.08
+    // {-0.1005, 0.16, 0.01, -0.1005, -0.16, -0.01}); // mujoco 仿真
   const auto box_tag_rotations_row_major = declare_parameter<std::vector<double>>(
     "box_tag_rotations_row_major",
     {
@@ -159,14 +159,15 @@ DetectServerNode::DetectServerNode()
     //           -1.000000,  0.000000,  0.000000,  0.03250,
     //             0.000000, -0.939693, -0.342020,  0.29242,
     //           0.000000,  0.000000,  0.000000,  1.000000;
-    // camera2base<<0.0000, -0.342020,  0.939693,  0.12972,  // 真机 低腰
-    //           -1.000000,  0.000000,  0.000000,  0.03250,
-    //             0.000000, -0.939693, -0.342020,  0.24561,
-    //           0.000000,  0.000000,  0.000000,  1.000000;
-    camera2base<<0.000000, -0.500134,  0.865948,  0.130000, // mujoco 仿真
-            -1.000000,  0.000000,  0.000000,  0.000000,
-              0.000000, -0.865948, -0.500134,  0.250000,
-            0.000000,  0.000000,  0.000000,  1.000000;
+    camera2base <<
+      0.0000, -0.342020,  0.939693,  0.12972,  // 真机 低腰
+      -1.000000,  0.000000,  0.000000,  0.03250,
+      0.000000, -0.939693, -0.342020,  0.24561,
+      0.000000,  0.000000,  0.000000,  1.000000;
+    // camera2base<<0.000000, -0.500134,  0.865948,  0.130000, // mujoco 仿真
+    //         -1.000000,  0.000000,  0.000000,  0.000000,
+    //           0.000000, -0.865948, -0.500134,  0.250000,
+    //         0.000000,  0.000000,  0.000000,  1.000000;
   RCLCPP_INFO(
     get_logger(),
     "AprilTag检测服务已启动: %s, image_topic=%s, camera_info_topic=%s, image_qos=%s, tag_size_m=%.4f, box_tag_count=%zu, debug_image_save_dir=%s",
@@ -244,6 +245,7 @@ void DetectServerNode::handleDetectRequest(
   }
 
   std::string last_failure_message = "尚未开始检测";
+  cv::Mat last_debug_image;
   for (int attempt = 1; attempt <= max_detection_attempts_; ++attempt) {
     cv::Mat color_image;
     sensor_msgs::msg::CameraInfo camera_info;
@@ -271,10 +273,19 @@ void DetectServerNode::handleDetectRequest(
       std::ostringstream oss;
       oss << "第" << attempt << "/" << max_detection_attempts_ << "次识别失败: " << message;
       last_failure_message = oss.str();
-      saveDebugImage(debug_image, false);
+      if (!debug_image.empty()) {
+        last_debug_image = debug_image;
+      }
       RCLCPP_WARN(get_logger(), "%s", last_failure_message.c_str());
       continue;
     }
+    RCLCPP_INFO(get_logger(), "detectBoxPose已正常返回，开始检查box位置");
+    RCLCPP_INFO(
+      get_logger(),
+      "box在base坐标系下位置: x=%.6f, y=%.6f, z=%.6f m",
+      box_pose.position.x,
+      box_pose.position.y,
+      box_pose.position.z);
 
     std::string validation_message;
     if (!validateBoxPosePosition(box_pose, validation_message)) {
@@ -285,10 +296,13 @@ void DetectServerNode::handleDetectRequest(
       if (!debug_image.empty()) {
         drawDebugStatus(debug_image, last_failure_message);
       }
-      saveDebugImage(debug_image, false);
+      if (!debug_image.empty()) {
+        last_debug_image = debug_image;
+      }
       RCLCPP_WARN(get_logger(), "%s", last_failure_message.c_str());
       continue;
     }
+    RCLCPP_INFO(get_logger(), "box位置检查通过，开始组织服务响应");
 
     std::ostringstream success_message;
     success_message << "第" << attempt << "/" << max_detection_attempts_ << "次检测成功: "
@@ -297,7 +311,9 @@ void DetectServerNode::handleDetectRequest(
     response->message = success_message.str();
     response->box_pose = box_pose;
 
+    RCLCPP_INFO(get_logger(), "开始保存检测成功调试图像");
     saveDebugImage(debug_image, true);
+    RCLCPP_INFO(get_logger(), "检测成功调试图像保存流程结束");
     RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
     return;
   }
@@ -307,6 +323,7 @@ void DetectServerNode::handleDetectRequest(
                 << "次，最后一次结果: " << last_failure_message;
   response->message = final_message.str();
   response->box_pose = fallbackPose();
+  saveDebugImage(last_debug_image, false);
   RCLCPP_WARN(get_logger(), "%s", response->message.c_str());
 }
 
@@ -450,7 +467,7 @@ bool DetectServerNode::detectBoxPose(
       rotation_vectors,
       translation_vectors);
 
-    if (rotation_vectors.empty() || translation_vectors.empty()) {
+    if (rotation_vectors.size() != ids.size() || translation_vectors.size() != ids.size()) {
       message = "AprilTag位姿估计失败，返回fallback_pose";
       if (!debug_image.empty()) {
         drawDebugStatus(debug_image, detected_ids_text.str() + "; pose estimation failed");
@@ -519,11 +536,14 @@ bool DetectServerNode::detectBoxPose(
       const cv::Vec3d translation_camera_box =
         translation_camera_tag - rotation_camera_box * translation_box_tag;
 
+      RCLCPP_INFO(get_logger(), "tag_id=%d 已完成box候选位姿计算", tag_id);
+
       // 每个匹配到的 tag 都能独立推算一次 box 位姿。
       // 如果两个 tag 都识别到了，后面 fuseBoxPoseCandidates 会把这些候选位姿融合。
       box_rotation_candidates.push_back(rotation_camera_box);
       box_translation_candidates.push_back(translation_camera_box);
       matched_tag_ids.push_back(tag_id);
+      RCLCPP_INFO(get_logger(), "tag_id=%d 已写入box候选列表", tag_id);
     }
 
     if (box_rotation_candidates.empty()) {
@@ -534,7 +554,10 @@ bool DetectServerNode::detectBoxPose(
       return false;
     }
 
+    RCLCPP_INFO(
+      get_logger(), "开始融合%zu个box位姿候选", box_rotation_candidates.size());
     box_pose = fuseBoxPoseCandidates(box_rotation_candidates, box_translation_candidates);
+    RCLCPP_INFO(get_logger(), "box位姿融合及base坐标变换完成");
 
     std::ostringstream oss;
     oss << "使用" << matched_tag_ids.size() << "个AprilTag定位box, ids=[";
@@ -635,6 +658,17 @@ geometry_msgs::msg::Pose DetectServerNode::fuseBoxPoseCandidates(
   const std::vector<cv::Matx33d> & rotation_candidates,
   const std::vector<cv::Vec3d> & translation_candidates) const
 {
+  if (rotation_candidates.empty() ||
+    rotation_candidates.size() != translation_candidates.size())
+  {
+    throw std::invalid_argument("box位姿候选数量无效");
+  }
+
+  // 单个 tag 的旋转矩阵已经是合法旋转，无需再进入 OpenCV SVD。
+  if (rotation_candidates.size() == 1) {
+    return buildPoseMessage(rotation_candidates.front(), translation_candidates.front());
+  }
+
   // rotation_candidates / translation_candidates 中的每一项，都是由一个 tag
   // 单独反推出的 T_cam_box。理论上，如果相机内参、tag尺寸、tag安装位置都完全准确，
   // 两个 tag 推出的 box 位姿应该一致；实际中会因为检测噪声、打印误差、贴纸误差产生偏差。
@@ -677,29 +711,27 @@ geometry_msgs::msg::Pose DetectServerNode::buildPoseMessage(
 {
   geometry_msgs::msg::Pose pose;
 
-
   Eigen::Matrix3d eigen_rotation;
   eigen_rotation <<
     rotation_matrix(0, 0), rotation_matrix(0, 1), rotation_matrix(0, 2),
     rotation_matrix(1, 0), rotation_matrix(1, 1), rotation_matrix(1, 2),
     rotation_matrix(2, 0), rotation_matrix(2, 1), rotation_matrix(2, 2);
 
-  // 增加外參矩陣使box to base
-  Eigen::Matrix4d box2camera,box2base;
-  box2camera.setIdentity();
-  box2camera.block<3,3>(0,0) = eigen_rotation;
-  box2camera(0,3) = translation_vector[0];
-  box2camera(1,3) = translation_vector[1];
-  box2camera(2,3) = translation_vector[2];
-  box2base = camera2base * box2camera;
-  // std::cout<<"box2camera pose:"<<box2camera<<"\n";
-  // std::cout<<"box2base pose:"<<box2base<<"\n";
+  Eigen::Matrix4d box2camera = Eigen::Matrix4d::Identity();
+  box2camera.block<3, 3>(0, 0) = eigen_rotation;
+  box2camera(0, 3) = translation_vector[0];
+  box2camera(1, 3) = translation_vector[1];
+  box2camera(2, 3) = translation_vector[2];
 
-  Eigen::Quaterniond quaternion(box2base.block<3,3>(0,0));
+  // T_base_box = T_base_camera * T_camera_box。
+  const Eigen::Matrix4d box2base = camera2base * box2camera;
+  const Eigen::Matrix3d rotation_base_box = box2base.block<3, 3>(0, 0);
+  Eigen::Quaterniond quaternion(rotation_base_box);
   quaternion.normalize();
-  pose.position.x = box2base(0,3);
-  pose.position.y = box2base(1,3);
-  pose.position.z = box2base(2,3);
+
+  pose.position.x = box2base(0, 3);
+  pose.position.y = box2base(1, 3);
+  pose.position.z = box2base(2, 3);
   pose.orientation.x = quaternion.x();
   pose.orientation.y = quaternion.y();
   pose.orientation.z = quaternion.z();
@@ -728,9 +760,9 @@ bool DetectServerNode::validateBoxPosePosition(
       has_error = true;
     };
 
-  append_axis_error("x", box_pose.position.x, 0.0, 1.0);
+  append_axis_error("x", box_pose.position.x, 0.0, 3.0);
   append_axis_error("y", box_pose.position.y, -0.5, 0.5);
-  append_axis_error("z", box_pose.position.z, 0.0, 0.3);
+  append_axis_error("z", box_pose.position.z, -0.5, 0.3);
 
   if (!has_error) {
     message = "position检查通过";
@@ -818,10 +850,18 @@ std::string DetectServerNode::buildDebugImagePath(bool success) const
     normalized_dir.pop_back();
   }
 
-  const std::string file_name =
-    debug_image_save_prefix_ + "_" +
-    (success ? "success_" : "failed_") +
-    std::to_string(now().nanoseconds()) + ".png";
+  const auto now_time = std::chrono::system_clock::now();
+  const std::time_t now_seconds = std::chrono::system_clock::to_time_t(now_time);
+  std::tm local_time{};
+  localtime_r(&now_seconds, &local_time);
+  const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    now_time.time_since_epoch()).count() % 1000000000LL;
+
+  std::ostringstream file_name_stream;
+  file_name_stream << std::put_time(&local_time, "%Y%m%d_%H%M%S")
+                   << "_" << std::setw(9) << std::setfill('0') << nanoseconds
+                   << (success ? "_success.png" : "_failed.png");
+  const std::string file_name = file_name_stream.str();
 
   if (normalized_dir.empty() || normalized_dir == ".") {
     return file_name;
@@ -855,13 +895,9 @@ void DetectServerNode::pruneDebugImages(std::size_t max_image_count) const
   };
   std::vector<DebugImageFile> image_files;
 
-  const std::string expected_prefix = debug_image_save_prefix_ + "_";
   while (dirent * entry = readdir(dir)) {
     const std::string file_name(entry->d_name);
     if (file_name == "." || file_name == "..") {
-      continue;
-    }
-    if (file_name.rfind(expected_prefix, 0) != 0) {
       continue;
     }
     if (file_name.size() < 4 || file_name.substr(file_name.size() - 4) != ".png") {
@@ -904,30 +940,10 @@ void DetectServerNode::pruneDebugImages(std::size_t max_image_count) const
 
 void DetectServerNode::drawDebugStatus(cv::Mat & debug_image, const std::string & text) const
 {
-  if (debug_image.empty()) {
-    return;
-  }
-
-  const int baseline_y = 32;
-  const cv::Point origin(12, baseline_y);
-  cv::putText(
-    debug_image,
-    text,
-    origin + cv::Point(1, 1),
-    cv::FONT_HERSHEY_SIMPLEX,
-    0.55,
-    cv::Scalar(0, 0, 0),
-    3,
-    cv::LINE_AA);
-  cv::putText(
-    debug_image,
-    text,
-    origin,
-    cv::FONT_HERSHEY_SIMPLEX,
-    0.55,
-    cv::Scalar(0, 255, 255),
-    1,
-    cv::LINE_AA);
+  // 当前 ARM64/OpenCV 运行环境在检测完成后进入 putText 时发生段错误。
+  // 状态文本不参与检测结果；保留边框、坐标轴和原调试图保存，暂不叠加文字。
+  (void)debug_image;
+  (void)text;
 }
 
 geometry_msgs::msg::Pose DetectServerNode::fallbackPose() const
