@@ -51,11 +51,11 @@ DetectServerNode::DetectServerNode()
   parameter_callback_handle_ = add_on_set_parameters_callback(
     std::bind(&DetectServerNode::onParametersSet, this, std::placeholders::_1));
 
-  const auto box_tag_ids = declare_parameter<std::vector<int64_t>>("box_tag_ids", {10, 24});
-
+  const auto box_tag_ids = declare_parameter<std::vector<int64_t>>("box_tag_ids", {10, 24,36});
+ //id 10与36针对box；24针对货架 
   const auto box_tag_positions_m = declare_parameter<std::vector<double>>(
     "box_tag_positions_m",
-    {-0.1475, 0.1255, -0.0305, 0.0, 0.0, 0.00}); // 后表面 0.08
+    {-0.1475, 0.1255, 0.0305, 0.0, 0.0, 0.00,0.1275,0.0875,0.0625}); // 后表面 0.08
     // {-0.1005, 0.16, 0.01, -0.1005, -0.16, -0.01}); // mujoco 仿真
   const auto box_tag_rotations_row_major = declare_parameter<std::vector<double>>(
     "box_tag_rotations_row_major",
@@ -65,7 +65,10 @@ DetectServerNode::DetectServerNode()
       1.0, 0.0, 0.0,
       0.0, 0.0, -1.0,
       0.0, 1.0, 0.0,
-      1.0, 0.0, 0.0
+      1.0, 0.0, 0.0,
+      0.0, 0.0, -1.0,
+      0.0, 1.0, 0.0,
+      1.0, 0.0, 0.0,
     });
 
   if (box_tag_positions_m.size() != box_tag_ids.size() * 3) {
