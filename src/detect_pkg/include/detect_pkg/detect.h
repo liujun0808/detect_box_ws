@@ -1,6 +1,5 @@
 #pragma once
 
-#include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -9,6 +8,8 @@
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
+
+#include <librealsense2/rs.hpp>
 
 #include <geometry_msgs/msg/pose.hpp>
 
@@ -22,7 +23,6 @@
 #include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
-#include <sensor_msgs/msg/image.hpp>
 
 #include "upper_limb_interface/srv/detect_april_tag.hpp"
 
@@ -47,29 +47,16 @@ private:
     cv::Matx33d rotation;
   };
 
-  // 服务回调：收到客户端请求后最多等待5张新图，并逐次执行 AprilTag 检测和位姿估计。
+  // 服务回调：收到客户端请求后最多获取5张新图，并逐次执行 AprilTag 检测和位姿估计。
   void handleDetectRequest(
     const std::shared_ptr<DetectAprilTag::Request> request,
     std::shared_ptr<DetectAprilTag::Response> response);
 
-  // 缓存相机节点发布的彩色图像，服务请求到来时直接使用最近一帧。
-  void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
-
-  // 缓存相机节点发布的彩色相机内参。
-  void cameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
-
-  // 从订阅缓存中取出最近一帧彩色图像和相机内参。
+  // 直接从 RealSense pipeline 获取一帧 BGR 彩图及该视频流的内参。
   bool captureColorFrame(
+    rs2::pipeline & camera_pipeline,
     cv::Mat & color_image,
     sensor_msgs::msg::CameraInfo & camera_info,
-    std::string & message) const;
-
-  // 等待一张比 previous_frame_id 更新的彩色图，并同时取出当前相机内参。
-  bool waitForNewColorFrame(
-    uint64_t previous_frame_id,
-    cv::Mat & color_image,
-    sensor_msgs::msg::CameraInfo & camera_info,
-    uint64_t & captured_frame_id,
     std::string & message);
 
   // 在彩色图像中识别两个 AprilTag，并融合估计 box 坐标系在相机坐标系下的位姿。
@@ -136,20 +123,8 @@ private:
     const std::vector<rclcpp::Parameter> & parameters);
 
   rclcpp::Service<DetectAprilTag>::SharedPtr service_;
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_subscription_;
-  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_subscription_;
   rclcpp::CallbackGroup::SharedPtr service_callback_group_;
-  rclcpp::CallbackGroup::SharedPtr camera_callback_group_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
-
-  // 订阅缓存：服务回调只读取最近一帧，避免服务端直接依赖 RealSense SDK。
-  mutable std::mutex camera_data_mutex_;
-  std::condition_variable camera_frame_cv_;
-  cv::Mat latest_color_image_;
-  sensor_msgs::msg::CameraInfo latest_camera_info_;
-  bool has_color_image_;
-  bool has_camera_info_;
-  uint64_t latest_color_frame_id_;
 
   // AprilTag 检测器参数和字典，默认识别 DICT_APRILTAG_36h11。
   // 注意：这里使用 opencv2/aruco.hpp 的旧接口，不使用 objdetect/ArucoDetector。
@@ -157,14 +132,16 @@ private:
   cv::Ptr<cv::aruco::DetectorParameters> detector_parameters_;
 
   std::string service_name_;
-  std::string image_topic_;
-  std::string camera_info_topic_;
-  std::string image_qos_;
+  std::string camera_serial_no_;
+  int camera_color_width_;
+  int camera_color_height_;
+  int camera_color_fps_;
+  int camera_warmup_frames_;
+  int camera_frame_timeout_ms_;
   std::string debug_image_save_prefix_;
   std::string debug_image_save_dir_;
   double tag_size_m_;
   int max_detection_attempts_;
-  int new_frame_timeout_ms_;
   std::map<int32_t, TagPoseInBox> tag_poses_in_box_;
   Eigen::Matrix4d camera2base;
   mutable std::mutex fallback_pose_mutex_;

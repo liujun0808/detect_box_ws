@@ -18,27 +18,33 @@ namespace detect_pkg
 
 DetectServerNode::DetectServerNode()
 : Node("detect_server_node"),
-  has_color_image_(false),
-  has_camera_info_(false),
-  latest_color_frame_id_(0),
   service_name_(declare_parameter<std::string>("service_name", "detect")),
-  image_topic_(declare_parameter<std::string>("image_topic", "/camera/camera/color/image_raw")),
-  camera_info_topic_(
-    declare_parameter<std::string>("camera_info_topic", "/camera/camera/color/camera_info")),
-  image_qos_(declare_parameter<std::string>("image_qos", "reliable")),
+  camera_serial_no_(declare_parameter<std::string>("camera_serial_no", "")),
+  camera_color_width_(declare_parameter<int>("camera_color_width", 640)),
+  camera_color_height_(declare_parameter<int>("camera_color_height", 480)),
+  camera_color_fps_(declare_parameter<int>("camera_color_fps", 15)),
+  camera_warmup_frames_(declare_parameter<int>("camera_warmup_frames", 15)),
+  camera_frame_timeout_ms_(declare_parameter<int>("camera_frame_timeout_ms", 2000)),
   debug_image_save_prefix_(declare_parameter<std::string>("debug_image_save_prefix", "apriltag_detection")),
   debug_image_save_dir_(declare_parameter<std::string>("debug_image_save_dir", "debug_img")),
   tag_size_m_(declare_parameter<double>("tag_size_m", 0.08)),
-  max_detection_attempts_(declare_parameter<int>("max_detection_attempts", 5)),
-  new_frame_timeout_ms_(declare_parameter<int>("new_frame_timeout_ms", 1000))
+  max_detection_attempts_(declare_parameter<int>("max_detection_attempts", 5))
 {
   if (max_detection_attempts_ < 1) {
     RCLCPP_WARN(get_logger(), "max_detection_attempts=%d无效，已改为1", max_detection_attempts_);
     max_detection_attempts_ = 1;
   }
-  if (new_frame_timeout_ms_ < 1) {
-    RCLCPP_WARN(get_logger(), "new_frame_timeout_ms=%d无效，已改为1", new_frame_timeout_ms_);
-    new_frame_timeout_ms_ = 1;
+  if (camera_color_width_ < 1 || camera_color_height_ < 1 || camera_color_fps_ < 1) {
+    throw std::invalid_argument("RealSense彩色流宽度、高度和帧率必须大于0");
+  }
+  if (camera_warmup_frames_ < 0) {
+    RCLCPP_WARN(get_logger(), "camera_warmup_frames=%d无效，已改为0", camera_warmup_frames_);
+    camera_warmup_frames_ = 0;
+  }
+  if (camera_frame_timeout_ms_ < 1) {
+    RCLCPP_WARN(
+      get_logger(), "camera_frame_timeout_ms=%d无效，已改为1", camera_frame_timeout_ms_);
+    camera_frame_timeout_ms_ = 1;
   }
 
   const auto fallback_pose_values = declare_parameter<std::vector<double>>(
@@ -119,33 +125,7 @@ DetectServerNode::DetectServerNode()
 
   detector_parameters_ = cv::aruco::DetectorParameters::create();
 
-  auto camera_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
-  if (image_qos_ == "best_effort" || image_qos_ == "sensor_data") {
-    camera_qos = rclcpp::SensorDataQoS();
-  } else if (image_qos_ != "reliable") {
-    RCLCPP_WARN(
-      get_logger(),
-      "未知 image_qos=%s，使用 reliable；可选 reliable/best_effort/sensor_data",
-      image_qos_.c_str());
-  }
-
-  camera_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   service_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-
-  rclcpp::SubscriptionOptions camera_subscription_options;
-  camera_subscription_options.callback_group = camera_callback_group_;
-
-  image_subscription_ = create_subscription<sensor_msgs::msg::Image>(
-    image_topic_,
-    camera_qos,
-    std::bind(&DetectServerNode::imageCallback, this, std::placeholders::_1),
-    camera_subscription_options);
-
-  camera_info_subscription_ = create_subscription<sensor_msgs::msg::CameraInfo>(
-    camera_info_topic_,
-    camera_qos,
-    std::bind(&DetectServerNode::cameraInfoCallback, this, std::placeholders::_1),
-    camera_subscription_options);
 
   service_ = create_service<DetectAprilTag>(
     service_name_,
@@ -173,63 +153,15 @@ DetectServerNode::DetectServerNode()
     //         0.000000,  0.000000,  0.000000,  1.000000;
   RCLCPP_INFO(
     get_logger(),
-    "AprilTag检测服务已启动: %s, image_topic=%s, camera_info_topic=%s, image_qos=%s, tag_size_m=%.4f, box_tag_count=%zu, debug_image_save_dir=%s",
+    "AprilTag检测服务已启动: %s, camera=RealSense API按请求启停 %dx%d@%d, warmup_frames=%d, tag_size_m=%.4f, box_tag_count=%zu, debug_image_save_dir=%s",
     service_name_.c_str(),
-    image_topic_.c_str(),
-    camera_info_topic_.c_str(),
-    image_qos_.c_str(),
+    camera_color_width_,
+    camera_color_height_,
+    camera_color_fps_,
+    camera_warmup_frames_,
     tag_size_m_,
     tag_poses_in_box_.size(),
     debug_image_save_dir_.c_str());
-}
-
-void DetectServerNode::imageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
-{
-  if (msg->height == 0 || msg->width == 0 || msg->data.empty()) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "收到空的彩色图像消息");
-    return;
-  }
-
-  cv::Mat color_image;
-  if (msg->encoding == "bgr8") {
-    cv::Mat view(
-      static_cast<int>(msg->height),
-      static_cast<int>(msg->width),
-      CV_8UC3,
-      const_cast<unsigned char *>(msg->data.data()),
-      msg->step);
-    color_image = view.clone();
-  } else if (msg->encoding == "rgb8") {
-    cv::Mat view(
-      static_cast<int>(msg->height),
-      static_cast<int>(msg->width),
-      CV_8UC3,
-      const_cast<unsigned char *>(msg->data.data()),
-      msg->step);
-    cv::cvtColor(view, color_image, cv::COLOR_RGB2BGR);
-  } else {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(),
-      *get_clock(),
-      2000,
-      "暂不支持的图像编码: %s，仅支持bgr8/rgb8",
-      msg->encoding.c_str());
-    return;
-  }
-
-  std::lock_guard<std::mutex> lock(camera_data_mutex_);
-  latest_color_image_ = color_image;
-  has_color_image_ = true;
-  ++latest_color_frame_id_;
-  camera_frame_cv_.notify_all();
-}
-
-void DetectServerNode::cameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
-{
-  std::lock_guard<std::mutex> lock(camera_data_mutex_);
-  latest_camera_info_ = *msg;
-  has_camera_info_ = true;
-  camera_frame_cv_.notify_all();
 }
 
 void DetectServerNode::handleDetectRequest(
@@ -241,34 +173,62 @@ void DetectServerNode::handleDetectRequest(
   response->box_pose = fallbackPose();
   response->success = false;
 
-  uint64_t last_used_frame_id = 0;
-  {
-    std::lock_guard<std::mutex> lock(camera_data_mutex_);
-    last_used_frame_id = latest_color_frame_id_;
+  rs2::pipeline camera_pipeline;
+  try {
+    rs2::config camera_config;
+    if (!camera_serial_no_.empty()) {
+      camera_config.enable_device(camera_serial_no_);
+    }
+    camera_config.enable_stream(
+      RS2_STREAM_COLOR,
+      camera_color_width_,
+      camera_color_height_,
+      RS2_FORMAT_BGR8,
+      camera_color_fps_);
+    camera_pipeline.start(camera_config);
+
+    RCLCPP_INFO(
+      get_logger(),
+      "检测请求已打开RealSense彩色流，开始丢弃%d帧进行预热",
+      camera_warmup_frames_);
+    for (int frame_index = 0; frame_index < camera_warmup_frames_; ++frame_index) {
+      camera_pipeline.wait_for_frames(
+        static_cast<unsigned int>(camera_frame_timeout_ms_));
+    }
+  } catch (const rs2::error & error) {
+    response->message = std::string("打开或预热RealSense失败: ") + error.what();
+    RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
+    return;
+  } catch (const std::exception & error) {
+    response->message = std::string("初始化RealSense异常: ") + error.what();
+    RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
+    return;
   }
+
+  const auto stop_camera_pipeline = [this, &camera_pipeline]() {
+      try {
+        camera_pipeline.stop();
+        RCLCPP_INFO(get_logger(), "本次检测请求已关闭RealSense彩色流");
+      } catch (const rs2::error & error) {
+        RCLCPP_WARN(get_logger(), "关闭RealSense彩色流失败: %s", error.what());
+      }
+    };
 
   std::string last_failure_message = "尚未开始检测";
   cv::Mat last_debug_image;
   for (int attempt = 1; attempt <= max_detection_attempts_; ++attempt) {
     cv::Mat color_image;
     sensor_msgs::msg::CameraInfo camera_info;
-    uint64_t captured_frame_id = last_used_frame_id;
     std::string message;
 
-    if (!waitForNewColorFrame(
-        last_used_frame_id,
-        color_image,
-        camera_info,
-        captured_frame_id,
-        message))
+    if (!captureColorFrame(camera_pipeline, color_image, camera_info, message))
     {
       std::ostringstream oss;
-      oss << "第" << attempt << "/" << max_detection_attempts_ << "次等待新图失败: " << message;
+      oss << "第" << attempt << "/" << max_detection_attempts_ << "次获取彩图失败: " << message;
       last_failure_message = oss.str();
       RCLCPP_WARN(get_logger(), "%s", last_failure_message.c_str());
       continue;
     }
-    last_used_frame_id = captured_frame_id;
 
     geometry_msgs::msg::Pose box_pose = fallbackPose();
     cv::Mat debug_image;
@@ -318,6 +278,7 @@ void DetectServerNode::handleDetectRequest(
     saveDebugImage(debug_image, true);
     RCLCPP_INFO(get_logger(), "检测成功调试图像保存流程结束");
     RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+    stop_camera_pipeline();
     return;
   }
 
@@ -327,81 +288,58 @@ void DetectServerNode::handleDetectRequest(
   response->message = final_message.str();
   response->box_pose = fallbackPose();
   saveDebugImage(last_debug_image, false);
+  stop_camera_pipeline();
   RCLCPP_WARN(get_logger(), "%s", response->message.c_str());
 }
 
 bool DetectServerNode::captureColorFrame(
+  rs2::pipeline & camera_pipeline,
   cv::Mat & color_image,
   sensor_msgs::msg::CameraInfo & camera_info,
-  std::string & message) const
-{
-  std::lock_guard<std::mutex> lock(camera_data_mutex_);
-  if (!has_color_image_ || latest_color_image_.empty()) {
-    message = "尚未收到相机彩色图像，请确认realsense2_camera已发布image_raw";
-    return false;
-  }
-  if (!has_camera_info_) {
-    message = "尚未收到相机内参，请确认realsense2_camera已发布camera_info";
-    return false;
-  }
-  if (latest_camera_info_.k[0] == 0.0 || latest_camera_info_.k[4] == 0.0) {
-    message = "相机内参无效，fx/fy为0";
-    return false;
-  }
-
-  color_image = latest_color_image_.clone();
-  camera_info = latest_camera_info_;
-  return true;
-}
-
-bool DetectServerNode::waitForNewColorFrame(
-  uint64_t previous_frame_id,
-  cv::Mat & color_image,
-  sensor_msgs::msg::CameraInfo & camera_info,
-  uint64_t & captured_frame_id,
   std::string & message)
 {
-  std::unique_lock<std::mutex> lock(camera_data_mutex_);
-  const auto timeout = std::chrono::milliseconds(new_frame_timeout_ms_);
-  const bool ready = camera_frame_cv_.wait_for(
-    lock,
-    timeout,
-    [this, previous_frame_id]() {
-      return has_color_image_ &&
-             !latest_color_image_.empty() &&
-             latest_color_frame_id_ > previous_frame_id &&
-             has_camera_info_ &&
-             latest_camera_info_.k[0] != 0.0 &&
-             latest_camera_info_.k[4] != 0.0;
-    });
-
-  if (!ready) {
-    if (!has_color_image_ || latest_color_image_.empty() ||
-      latest_color_frame_id_ <= previous_frame_id)
-    {
-      std::ostringstream oss;
-      oss << "等待新彩色图像超时(" << new_frame_timeout_ms_
-          << "ms)，未收到比frame_id=" << previous_frame_id << "更新的图像";
-      message = oss.str();
-      return false;
-    }
-    if (!has_camera_info_) {
-      message = "等待新彩色图像成功，但尚未收到相机内参";
-      return false;
-    }
-    if (latest_camera_info_.k[0] == 0.0 || latest_camera_info_.k[4] == 0.0) {
-      message = "等待新彩色图像成功，但相机内参无效，fx/fy为0";
+  try {
+    const rs2::frameset frames = camera_pipeline.wait_for_frames(
+      static_cast<unsigned int>(camera_frame_timeout_ms_));
+    const rs2::video_frame color_frame = frames.get_color_frame();
+    if (!color_frame) {
+      message = "RealSense frameset中没有彩色帧";
       return false;
     }
 
-    message = "等待新彩色图像超时";
+    const auto video_profile = color_frame.get_profile().as<rs2::video_stream_profile>();
+    const rs2_intrinsics intrinsics = video_profile.get_intrinsics();
+    if (intrinsics.fx <= 0.0F || intrinsics.fy <= 0.0F) {
+      message = "RealSense彩色相机内参无效，fx/fy为0";
+      return false;
+    }
+
+    cv::Mat color_view(
+      color_frame.get_height(),
+      color_frame.get_width(),
+      CV_8UC3,
+      const_cast<void *>(color_frame.get_data()),
+      static_cast<std::size_t>(color_frame.get_stride_in_bytes()));
+    color_image = color_view.clone();
+
+    camera_info = sensor_msgs::msg::CameraInfo();
+    camera_info.width = static_cast<uint32_t>(intrinsics.width);
+    camera_info.height = static_cast<uint32_t>(intrinsics.height);
+    camera_info.distortion_model = "plumb_bob";
+    camera_info.k = {
+      static_cast<double>(intrinsics.fx), 0.0, static_cast<double>(intrinsics.ppx),
+      0.0, static_cast<double>(intrinsics.fy), static_cast<double>(intrinsics.ppy),
+      0.0, 0.0, 1.0};
+    camera_info.d.assign(std::begin(intrinsics.coeffs), std::end(intrinsics.coeffs));
+    message = "已通过RealSense API获取彩色图像和内参";
+    return true;
+  } catch (const rs2::error & error) {
+    message = std::string("RealSense获取彩色帧失败: ") + error.what();
+    return false;
+  } catch (const std::exception & error) {
+    message = std::string("获取彩色帧异常: ") + error.what();
     return false;
   }
-
-  color_image = latest_color_image_.clone();
-  camera_info = latest_camera_info_;
-  captured_frame_id = latest_color_frame_id_;
-  return true;
 }
 
 bool DetectServerNode::detectBoxPose(

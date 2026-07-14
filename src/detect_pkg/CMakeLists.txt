@@ -11,6 +11,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(upper_limb_interface REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(realsense2 REQUIRED)
 
 # 使用 OpenCV aruco 模块的旧接口：
 #   cv::aruco::detectMarkers()
@@ -47,6 +48,7 @@ ament_target_dependencies(detect_server_node
 
 target_link_libraries(detect_server_node
   Eigen3::Eigen
+  realsense2::realsense2
   ${OpenCV_LIBS}
   opencv_aruco
   opencv_calib3d
