@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-WORKSPACE_DIR="/home/user/project/detect_box_ws"
+WORKSPACE_DIR="/home/user/detect_box_ws"
 ROS_SETUP="/opt/ros/humble/setup.bash"
 WS_SETUP="${WORKSPACE_DIR}/install/setup.bash"
-CAMERA_START_DELAY=5
 export ROS_DOMAIN_ID=19
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export ROS_LOCALHOST_ONLY=0
@@ -29,25 +28,6 @@ set -u
 
 cd "${WORKSPACE_DIR}"
 
-cleanup() {
-  trap - SIGINT SIGTERM EXIT
-  if [[ -n "${DETECT_PID:-}" ]]; then
-    kill "${DETECT_PID}" 2>/dev/null || true
-  fi
-  if [[ -n "${CAMERA_PID:-}" ]]; then
-    kill "${CAMERA_PID}" 2>/dev/null || true
-  fi
-  wait 2>/dev/null || true
-}
-
-trap cleanup SIGINT SIGTERM EXIT
-
-ros2 launch d435_publisher d435i_camera.launch.py &
-CAMERA_PID=$!
-
-sleep "${CAMERA_START_DELAY}"
-
-ros2 run detect_pkg detect_server_node &
-DETECT_PID=$!
-
-wait -n "${CAMERA_PID}" "${DETECT_PID}"
+# 检测节点收到服务请求后才通过 librealsense2 打开相机，节点空闲时不占用设备。
+# 使用 exec 让 systemd 直接监督 ROS 进程，并将 SIGINT 直接传给节点。
+exec ros2 run detect_pkg detect_server_node

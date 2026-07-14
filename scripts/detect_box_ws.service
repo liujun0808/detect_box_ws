@@ -1,5 +1,5 @@
 [Unit]
-Description=Detect Box ROS nodes
+Description=Detect Box ROS detection service
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=60
@@ -8,9 +8,9 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=user
-WorkingDirectory=/home/user/project/detect_box_ws
+WorkingDirectory=/home/user/detect_box_ws
 ExecStartPre=/bin/sleep 5
-ExecStart=/home/user/project/detect_box_ws/scripts/start_ros_nodes.sh
+ExecStart=/home/user/detect_box_ws/scripts/start_ros_nodes.sh
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
