@@ -19,6 +19,9 @@ namespace detect_pkg
 DetectServerNode::DetectServerNode()
 : Node("detect_server_node"),
   service_name_(declare_parameter<std::string>("service_name", "detect")),
+  box_pose_topic_(declare_parameter<std::string>("box_pose_topic", "box_pose")),
+  box_pose_frame_id_(declare_parameter<std::string>("box_pose_frame_id", "base_link")),
+  box_pose_publish_rate_hz_(declare_parameter<double>("box_pose_publish_rate_hz", 10.0)),
   camera_serial_no_(declare_parameter<std::string>("camera_serial_no", "")),
   camera_color_width_(declare_parameter<int>("camera_color_width", 640)),
   camera_color_height_(declare_parameter<int>("camera_color_height", 480)),
@@ -27,12 +30,15 @@ DetectServerNode::DetectServerNode()
   camera_frame_timeout_ms_(declare_parameter<int>("camera_frame_timeout_ms", 2000)),
   debug_image_save_prefix_(declare_parameter<std::string>("debug_image_save_prefix", "apriltag_detection")),
   debug_image_save_dir_(declare_parameter<std::string>("debug_image_save_dir", "debug_img")),
-  tag_size_m_(declare_parameter<double>("tag_size_m", 0.08)),
+  tag_size_m_(declare_parameter<double>("tag_size_m", 0.075)),
   max_detection_attempts_(declare_parameter<int>("max_detection_attempts", 5))
 {
   if (max_detection_attempts_ < 1) {
     RCLCPP_WARN(get_logger(), "max_detection_attempts=%d无效，已改为1", max_detection_attempts_);
     max_detection_attempts_ = 1;
+  }
+  if (box_pose_publish_rate_hz_ <= 0.0) {
+    throw std::invalid_argument("box_pose_publish_rate_hz必须大于0");
   }
   if (camera_color_width_ < 1 || camera_color_height_ < 1 || camera_color_fps_ < 1) {
     throw std::invalid_argument("RealSense彩色流宽度、高度和帧率必须大于0");
@@ -62,7 +68,6 @@ DetectServerNode::DetectServerNode()
   const auto box_tag_positions_m = declare_parameter<std::vector<double>>(
     "box_tag_positions_m",
     {-0.1475, 0.1255, 0.0305, 0.0, 0.0, 0.00,0.1275,0.0875,0.0625}); // 后表面 0.08
-    // {-0.1005, 0.16, 0.01, -0.1005, -0.16, -0.01}); // mujoco 仿真
   const auto box_tag_rotations_row_major = declare_parameter<std::vector<double>>(
     "box_tag_rotations_row_major",
     {
@@ -136,6 +141,29 @@ DetectServerNode::DetectServerNode()
       std::placeholders::_2),
     rmw_qos_profile_services_default,
     service_callback_group_);
+
+  box_pose_publisher_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+    box_pose_topic_, rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
+  const auto publish_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::duration<double>(1.0 / box_pose_publish_rate_hz_));
+  box_pose_publish_timer_ = create_wall_timer(
+    publish_period,
+    [this]() {
+      geometry_msgs::msg::Pose pose;
+      {
+        std::lock_guard<std::mutex> lock(published_box_pose_mutex_);
+        if (!has_successful_box_pose_) {
+          return;
+        }
+        pose = latest_successful_box_pose_;
+      }
+
+      geometry_msgs::msg::PoseStamped pose_message;
+      pose_message.header.stamp = now();
+      pose_message.header.frame_id = box_pose_frame_id_;
+      pose_message.pose = pose;
+      box_pose_publisher_->publish(pose_message);
+    });
   
   // 外參矩陣初始化
     // camera2base<<0.0000, -0.342020,  0.939693,  0.138680,  // 真机 高腰
@@ -153,7 +181,7 @@ DetectServerNode::DetectServerNode()
     //         0.000000,  0.000000,  0.000000,  1.000000;
   RCLCPP_INFO(
     get_logger(),
-    "AprilTag检测服务已启动: %s, camera=RealSense API按请求启停 %dx%d@%d, warmup_frames=%d, tag_size_m=%.4f, box_tag_count=%zu, debug_image_save_dir=%s",
+    "AprilTag检测服务已启动: %s, camera=RealSense API按请求启停 %dx%d@%d, warmup_frames=%d, tag_size_m=%.4f, box_tag_count=%zu, pose_topic=%s@%.1fHz, debug_image_save_dir=%s",
     service_name_.c_str(),
     camera_color_width_,
     camera_color_height_,
@@ -161,6 +189,8 @@ DetectServerNode::DetectServerNode()
     camera_warmup_frames_,
     tag_size_m_,
     tag_poses_in_box_.size(),
+    box_pose_topic_.c_str(),
+    box_pose_publish_rate_hz_,
     debug_image_save_dir_.c_str());
 }
 
@@ -273,6 +303,16 @@ void DetectServerNode::handleDetectRequest(
     response->success = true;
     response->message = success_message.str();
     response->box_pose = box_pose;
+    {
+      std::lock_guard<std::mutex> lock(published_box_pose_mutex_);
+      latest_successful_box_pose_ = box_pose;
+      has_successful_box_pose_ = true;
+    }
+    RCLCPP_INFO(
+      get_logger(),
+      "已更新持续发布位姿: topic=%s, frame_id=%s",
+      box_pose_topic_.c_str(),
+      box_pose_frame_id_.c_str());
 
     RCLCPP_INFO(get_logger(), "开始保存检测成功调试图像");
     saveDebugImage(debug_image, true);

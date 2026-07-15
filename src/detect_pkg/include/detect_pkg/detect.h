@@ -12,6 +12,7 @@
 #include <librealsense2/rs.hpp>
 
 #include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -123,6 +124,8 @@ private:
     const std::vector<rclcpp::Parameter> & parameters);
 
   rclcpp::Service<DetectAprilTag>::SharedPtr service_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr box_pose_publisher_;
+  rclcpp::TimerBase::SharedPtr box_pose_publish_timer_;
   rclcpp::CallbackGroup::SharedPtr service_callback_group_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
 
@@ -132,6 +135,9 @@ private:
   cv::Ptr<cv::aruco::DetectorParameters> detector_parameters_;
 
   std::string service_name_;
+  std::string box_pose_topic_;
+  std::string box_pose_frame_id_;
+  double box_pose_publish_rate_hz_;
   std::string camera_serial_no_;
   int camera_color_width_;
   int camera_color_height_;
@@ -146,6 +152,9 @@ private:
   Eigen::Matrix4d camera2base;
   mutable std::mutex fallback_pose_mutex_;
   geometry_msgs::msg::Pose fallback_pose_;
+  mutable std::mutex published_box_pose_mutex_;
+  geometry_msgs::msg::Pose latest_successful_box_pose_;
+  bool has_successful_box_pose_{false};
 };
 
 }  // namespace detect_pkg
