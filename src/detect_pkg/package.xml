@@ -13,6 +13,7 @@
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>upper_limb_interface</depend>
+  <depend>visualization_msgs</depend>
   <depend>opencv</depend>
   <depend>librealsense2</depend>
   <exec_depend>rclpy</exec_depend>

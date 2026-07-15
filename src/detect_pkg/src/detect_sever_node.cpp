@@ -142,7 +142,7 @@ DetectServerNode::DetectServerNode()
     rmw_qos_profile_services_default,
     service_callback_group_);
 
-  box_pose_publisher_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+  box_pose_publisher_ = create_publisher<visualization_msgs::msg::Marker>(
     box_pose_topic_, rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
   const auto publish_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
     std::chrono::duration<double>(1.0 / box_pose_publish_rate_hz_));
@@ -158,11 +158,22 @@ DetectServerNode::DetectServerNode()
         pose = latest_successful_box_pose_;
       }
 
-      geometry_msgs::msg::PoseStamped pose_message;
-      pose_message.header.stamp = now();
-      pose_message.header.frame_id = box_pose_frame_id_;
-      pose_message.pose = pose;
-      box_pose_publisher_->publish(pose_message);
+      visualization_msgs::msg::Marker marker;
+      marker.header.stamp = now();
+      marker.header.frame_id = box_pose_frame_id_;
+      marker.ns = "detected_box";
+      marker.id = 0;
+      marker.type = visualization_msgs::msg::Marker::CUBE;
+      marker.action = visualization_msgs::msg::Marker::ADD;
+      marker.pose = pose;
+      marker.scale.x = 0.295;
+      marker.scale.y = 0.395;
+      marker.scale.z = 0.225;
+      marker.color.r = 0.1F;
+      marker.color.g = 0.8F;
+      marker.color.b = 0.2F;
+      marker.color.a = 0.65F;
+      box_pose_publisher_->publish(marker);
     });
   
   // 外參矩陣初始化

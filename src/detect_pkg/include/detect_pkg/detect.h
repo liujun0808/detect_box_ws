@@ -12,7 +12,7 @@
 #include <librealsense2/rs.hpp>
 
 #include <geometry_msgs/msg/pose.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <visualization_msgs/msg/marker.hpp>
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -124,7 +124,7 @@ private:
     const std::vector<rclcpp::Parameter> & parameters);
 
   rclcpp::Service<DetectAprilTag>::SharedPtr service_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr box_pose_publisher_;
+  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr box_pose_publisher_;
   rclcpp::TimerBase::SharedPtr box_pose_publish_timer_;
   rclcpp::CallbackGroup::SharedPtr service_callback_group_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;

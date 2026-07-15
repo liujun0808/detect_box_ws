@@ -10,6 +10,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(upper_limb_interface REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(realsense2 REQUIRED)
 
@@ -44,6 +45,7 @@ ament_target_dependencies(detect_server_node
   rclcpp
   sensor_msgs
   upper_limb_interface
+  visualization_msgs
 )
 
 target_link_libraries(detect_server_node
