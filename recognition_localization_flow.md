@@ -1,83 +1,49 @@
 # 识别与定位流程说明
 
-本文简要说明项目中 AprilTag 识别、box 定位和 ROS2 接口通信的整体模式。
+本文说明当前项目中的 D435 深度运动检测、box 当前观察定位和 ROS2 接口通信模式。
 
 ## 总体模式
 
-项目采用“相机发布节点”和“检测服务节点”分离的模式。
-
-- 相机节点`d435i_camera.launch.py`负责发布彩色图像和相机内参。
-- `detect_server_node` 只订阅图像与内参，不负责启动相机。
-- 上层节点通过 ROS2 service 请求一次检测结果。
-- 检测节点收到请求后执行 AprilTag 识别、box 定位，并返回 `box_pose`。
+- `detect_server_node` 是唯一检测服务节点。
+- 上层仍通过 `/detect` 服务发起一次检测请求。
+- 服务类型仍保持 `upper_limb_interface/srv/DetectAprilTag`，这是历史接口名，字段不变。
+- 检测节点收到请求后，通过 RealSense 深度流采集约 0.8 秒短窗口。
+- 检测节点不使用人工标记，不检测 tag，不做 tag 位姿融合。
+- 成功时返回 box 在 `base_link` 下的当前观察位姿。
+- 本阶段返回位姿只用于观察、显示、记录和提示，不代表可抓取位姿。
 
 ## 流程图
 
 ```mermaid
 flowchart TD
-    A[相机发布节点<br/>D435 / 仿真相机] --> B[/彩色图像 topic<br/>/camera/camera/color/image_raw/]
-    A --> C[/相机内参 topic<br/>/camera/camera/color/camera_info/]
-
-    B --> D[detect_server_node<br/>缓存最新图像]
-    C --> D
-
-    E[上层调用节点<br/>抓取流程 / 测试客户端] --> F[/检测服务 /detect<br/>DetectAprilTag/]
-    F --> D
-
-    D --> G[等待新图像与有效内参]
-    G --> H[AprilTag 检测]
-    H --> I{是否识别到<br/>目标 box tag}
-
-    I -- 否 --> J[返回 success=false<br/>box_pose=fallback_pose]
-    I -- 是 --> K[估计 T_cam_tag]
-    K --> L[根据 T_box_tag<br/>反推 T_cam_box]
-    L --> M[多 tag 位姿融合]
-    M --> N[camera2base 外参转换<br/>得到 box_pose in base_link]
-    N --> O{位置校验是否通过}
-
-    O -- 否 --> J
-    O -- 是 --> P[保存识别图像到 debug_img]
-    P --> Q[返回 success=true<br/>box_pose=定位结果]
-
-    J --> R[保存失败图像到 debug_img]
+    A[上层调用节点<br/>抓取流程 / 测试客户端] --> B[/检测服务 /detect<br/>DetectAprilTag/]
+    B --> C[detect_server_node]
+    C --> D[采集 D435 深度短窗口<br/>默认约 0.8 秒]
+    D --> E[间隔帧深度差分]
+    E --> F[多组差分累计投票]
+    F --> G{是否存在<br/>运动候选}
+    G -- 否 --> H[返回 success=false<br/>box_pose=fallback_pose]
+    G -- 是 --> I[按右到左运动先验<br/>向右扩张候选框]
+    I --> J[从最后一帧完整深度图<br/>提取候选点云]
+    J --> K[camera 坐标系 3D ROI 过滤]
+    K --> L[上沿候选点平面 RANSAC]
+    L --> M[局部平面 PCA<br/>估计观察中心与姿态]
+    M --> N[T_base_camera 外参转换<br/>得到 box_pose in base_link]
+    N --> O[发布 box_pose Marker]
+    O --> P[返回 success=true<br/>box_pose=观察位姿]
 ```
 
-## 识别与定位步骤
-
-1. 相机节点持续发布彩色图像和相机内参。
-2. `detect_server_node` 缓存最新图像和内参。
-3. 上层节点调用 `DetectAprilTag` 服务。
-4. 检测节点等待一帧新图像，使用 OpenCV 检测 AprilTag。
-5. 只保留配置在 `box_tag_ids` 中的目标 tag。
-6. 根据 tag 在 box 上的安装位置，将 `T_cam_tag` 换算为 `T_cam_box`。
-7. 如果识别到多个目标 tag，则融合多个 box 位姿候选。
-8. 使用内部 `camera2base` 外参转换到 `base_link` 坐标系。
-9. 成功时返回定位结果；失败时返回 `fallback_pose`。
-
-核心变换关系：
+## 坐标变换
 
 ```text
-T_cam_tag = T_cam_box * T_box_tag
-T_cam_box = T_cam_tag * inverse(T_box_tag)
-T_base_box = T_base_camera * T_cam_box
+T_base_box = T_base_camera * T_camera_box
 ```
+
+`T_base_camera` 沿用原检测节点中的固定外参语义。机器人站位相对传送带的小幅变化不改变该外参。
 
 ## 接口通信
 
-### Topic 输入
-
-检测节点订阅：
-
-```text
-/camera/camera/color/image_raw 
-/camera/camera/color/camera_info 
-```
-
-图像 topic 只用于缓存最新帧；真正的识别计算由 service 请求触发。
-
-### Service 接口
-
-服务类型：
+### Service
 
 ```text
 /detect
@@ -100,22 +66,28 @@ geometry_msgs/Pose box_pose
 
 含义：
 
-- `success=true`：`box_pose` 是识别出的 box 位姿。
-- `success=false`：`box_pose` 是 `fallback_pose` 指定的失败位姿。
-- `message`：说明本次识别结果或失败原因。
+- `success=true`：`box_pose` 是深度方案估计出的当前观察位姿。
+- `success=false`：`box_pose` 是 `fallback_pose`。
+- `message`：包含检测状态、运动状态、几何状态、候选框和可见比例等调试信息。
 
+### Topic
 
-## 图像保存
+```text
+box_pose
+```
 
-每次服务请求完成识别流程后，检测节点会保存本次图像到 `debug_img`。
+成功检测后发布 `visualization_msgs/msg/Marker`，默认 `frame_id=base_link`。
 
-- 成功图像包含 tag 边框、tag ID、坐标轴、匹配到的 box tag ID 和 box 平移结果。
-- 失败图像包含当前失败原因。
-- 文件名带时间戳，不会覆盖历史图片；目录中最多保留最新 10 张检测图。
+## 调试输出
+
+每次服务请求会在 `debug_depth/` 保存调试图：
+
+- `motion_*.png`：间隔帧差分投票后的运动掩膜。
+- `depth_*.png`：最后一帧深度伪彩色图和扩张候选框。
 
 ## 关键边界
 
-- 检测节点不启动相机，只消费 ROS topic。
-- 当前坐标转换使用源码中的 `camera2base` 外参矩阵，不在服务回调中查 TF。
-- 上层逻辑应优先根据 `success` 判断定位是否有效。
-- tag 尺寸、tag 安装位姿、相机内参和 `camera2base` 必须一致，否则定位会偏移。
+- 检测到箱体不等于可以抓取。
+- 当前观察位姿不等于人工停止后的最终抓取位姿。
+- 运动中输出的 `box_pose` 只能用于观察、显示、记录和提示。
+- 深度 ROI、箱体尺寸和运动阈值需要根据现场实测调整。

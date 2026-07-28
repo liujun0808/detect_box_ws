@@ -8,22 +8,15 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
 find_package(upper_limb_interface REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(realsense2 REQUIRED)
 
-# 使用 OpenCV aruco 模块的旧接口：
-#   cv::aruco::detectMarkers()
-#   cv::aruco::estimatePoseSingleMarkers()
-# 不使用 objdetect/ArucoDetector，避免与你当前环境中的 OpenCV 库产生链接不匹配。
 find_package(OpenCV REQUIRED COMPONENTS
   core
   imgproc
-  calib3d
   imgcodecs
-  aruco
 )
 
 message(STATUS "OpenCV_VERSION=${OpenCV_VERSION}")
@@ -31,7 +24,7 @@ message(STATUS "OpenCV_LIBS=${OpenCV_LIBS}")
 message(STATUS "OpenCV_LIBRARIES=${OpenCV_LIBRARIES}")
 
 add_executable(detect_server_node
-  src/detect_sever_node.cpp
+  src/detect_server_node.cpp
 )
 
 target_include_directories(detect_server_node
@@ -43,7 +36,6 @@ target_include_directories(detect_server_node
 ament_target_dependencies(detect_server_node
   geometry_msgs
   rclcpp
-  sensor_msgs
   upper_limb_interface
   visualization_msgs
 )
@@ -52,8 +44,6 @@ target_link_libraries(detect_server_node
   Eigen3::Eigen
   realsense2::realsense2
   ${OpenCV_LIBS}
-  opencv_aruco
-  opencv_calib3d
   opencv_imgcodecs
   opencv_imgproc
   opencv_core
@@ -80,6 +70,10 @@ install(PROGRAMS
 )
 
 install(FILES README.md
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )
 

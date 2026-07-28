@@ -20,7 +20,7 @@ upper_limb_interface/
 
 ### DetectAprilTag.srv
 
-用于触发一次 AprilTag/box 检测，并返回 box 位姿。
+历史命名保持不变，用于触发一次箱体检测，并返回 box 当前观察位姿。
 
 ```srv
 bool capture_once
@@ -32,8 +32,8 @@ geometry_msgs/Pose box_pose
 
 字段说明：
 
-- `capture_once`：触发一次检测。当前检测节点收到请求即使用最近图像执行检测。
-- `success`：检测是否成功。
+- `capture_once`：触发一次检测。当前检测节点收到请求即采集一个短时间深度窗口执行检测。
+- `success`：是否成功估计到当前观察位姿。
 - `message`：检测结果说明或失败原因。
 - `box_pose`：box 坐标系在 `base_link` 坐标系下的位姿。失败时由服务端返回单位位姿。
 

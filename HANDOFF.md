@@ -2,85 +2,71 @@
 
 ## 当前任务
 
-工作区：`/home/user/detect_box_ws`，ROS 2 Humble，ARM64。
+工作区：`/home/ub/project/detect_box_ws`，ROS 2 Humble。
 
-`detect_pkg/detect_server_node` 从 RealSense 彩色图中检测 AprilTag，根据 tag 在目标物上的安装位姿求 `T_camera_target`，再通过固定外参计算：
+`detect_pkg/detect_server_node` 已切换为 D435 深度运动检测方案。节点收到 `/detect` 服务请求后采集短时间深度窗口，根据间隔帧深度差分生成运动候选，再从当前完整深度图中估计 box 当前观察位姿。
 
-```text
-T_base_target = T_base_camera * T_camera_target
-```
+保留不变：
 
-结果通过 `detect` 服务返回，同时做位置范围检查并保存调试图。
+- 运行入口：`ros2 run detect_pkg detect_server_node`
+- 服务：`/detect`
+- 服务类型：`upper_limb_interface/srv/DetectAprilTag`
+- 响应字段：`success/message/box_pose`
+- 可视化话题：`box_pose`
+- 外参语义：`T_base_box = T_base_camera * T_camera_box`
+- 默认 `camera_to_base_row_major` 值沿用原真机低腰外参
 
-主要文件：
+## 主要文件
 
-- `src/detect_pkg/src/detect_sever_node.cpp`
-- `src/detect_pkg/include/detect_pkg/detect.h`
+- `src/detect_pkg/src/detect_server_node.cpp`
+- `src/detect_pkg/include/detect_pkg/depth_box_detection.hpp`
+- `src/detect_pkg/config/depth_box_detection.yaml`
+- `src/detect_pkg/CMakeLists.txt`
+- `recognition_localization_flow.md`
 
-## 当前 Tag 配置
-
-代码中目前登记了 3 个 tag：
-
-| ID | 用途 | `T_target_tag` 平移 (m) |
-|---|---|---|
-| 10 | box | `[-0.1475, 0.1255, 0.0305]` |
-| 24 | 货架 | `[0.0, 0.0, 0.0]` |
-| 36 | box（新增） | `[0.1275, 0.0875, 0.0625]` |
-
-三个 tag 当前配置了相同旋转矩阵：
+## 当前实现链路
 
 ```text
- 0  0 -1
- 0  1  0
- 1  0  0
+DetectOnce
+  -> D435 深度短窗口采集
+  -> 间隔帧深度差分
+  -> 多组差分投票
+  -> 候选框右向扩张
+  -> 当前深度图点云
+  -> camera 坐标系 3D ROI
+  -> 上沿候选平面 RANSAC
+  -> 局部平面 PCA 估计观察位姿
+  -> T_base_camera 转 base_link
+  -> 返回 box_pose / 发布 Marker
 ```
 
-重要：当前程序会把 `box_tag_ids` 中所有可见 tag 都当成同一目标的定位依据并进行融合。注释却说明 10/36 属于 box、24 属于货架。下一步必须确认业务意图：
-
-- 如果服务只返回 box 位姿，tag 24 不应与 10/36 一起融合。
-- 如果 tag 24 用于定位货架，应拆分目标配置或单独输出货架位姿。
-- 如果 `[0,0,0]` 是刻意把货架 tag 当作目标原点，需明确目标坐标系名称，避免继续用 `box` 命名造成误解。
-
-## 已完成
-
-- AprilTag 检测、单 tag 位姿估计和多 tag 候选融合已实现。
-- 位姿链路使用 Eigen 4x4 齐次矩阵，`camera2base` 的语义是 `T_base_camera`。
-- 保留 `ids/rvec/tvec` 数量检查、候选数量检查和 Eigen 对齐保护。
-- 单 tag 不进入 SVD；多个 tag 使用 SVD 将平均旋转投影回 SO(3)。
-- 无论位置是否越界，都会打印 base 坐标系下完整 `x/y/z`。
-- 每次服务请求最多保存一张调试图；失败时保存最后一次有效图像。
-- `debug_img` 中只保留最新 10 张 PNG，文件名以可读时间戳命名。
-- 已定位并解决运行时段错误：ARM64 环境中 `drawDebugStatus()` 调用 `cv::putText()` 后崩溃。当前该函数有意保持空实现，边框、坐标轴和图片保存不受影响。
-
-## 当前待验证
-
-新增 tag 36 后尚需真机验证：
-
-1. 单独看到 tag 10、tag 36 时，计算出的目标位姿是否一致。
-2. 同时看到 tag 10 和 36 时，融合结果是否稳定。
-3. 同时看到 tag 24 与 10/36 时，是否错误融合了货架与 box。
-4. 每次请求是否只新增一张图片，目录是否始终不超过 10 张。
-5. 最新源码构建后是否仍无段错误，返回的 base 坐标方向是否符合机器人定义。
-
-当前位置允许范围：`x=[0,1] m`、`y=[-0.5,0.5] m`、`z=[0,0.3] m`。超出范围是业务校验失败，不是检测或变换崩溃。
-
-## 下一步
+## 启动
 
 ```bash
-cd /home/user/detect_box_ws
-colcon build --packages-select detect_pkg --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cd /home/ub/project/detect_box_ws
 source install/setup.bash
-ros2 pkg prefix detect_pkg
-ros2 run detect_pkg detect_server_node
+ros2 run detect_pkg detect_server_node --ros-args \
+  --params-file src/detect_pkg/config/depth_box_detection.yaml
 ```
 
-依次测试只显示 10、只显示 36、同时显示 10/36、以及 24 与 box tag 同时出现的情况。根据结果决定是否把货架 tag 24 从 box 配置中拆出。
+测试客户端仍可使用：
 
-## 不要再踩的坑
+```bash
+ros2 run detect_pkg detect_client_node
+```
 
-- 不要混用 `/home/user/project/detect_box_ws`；实际运行工作区是 `/home/user/detect_box_ws`。
-- 不要恢复 `cv::putText()`，除非先用最小程序或 GDB 确认 ARM64/OpenCV 问题已解决。
-- 不要把 tag 24 和 box tag 融合，除非已经明确它们共享同一个目标坐标系。
-- 不要改变 `camera2base` 的语义；它必须保持为 `T_base_camera`。
-- 构建后必须重新 `source install/setup.bash`，并用 `ros2 pkg prefix detect_pkg` 核对实际运行来源。
+## 边界
 
+- 当前输出是运动中观察位姿，不是最终抓取位姿。
+- `success=true` 只表示视觉产生了当前观察位姿。
+- 失败时 `box_pose` 返回 `fallback_pose`。
+- 需要现场实测箱体尺寸并调整 `box_outer_length_m/box_outer_width_m/box_outer_height_m`。
+- 需要现场调 `roi_*`、`depth_difference_threshold_m`、`min_motion_votes`、候选框扩张像素。
+
+## 验证建议
+
+1. 空传送带请求，确认 `success=false` 且 `debug_depth/motion_failed_*.png` 没有大面积误检。
+2. 箱体从右向左进入视野，确认候选框主要覆盖箱体已进入部分和右侧扩张区域。
+3. 箱体只露出左侧小部分时，应优先返回部分进入或失败，不应输出伪完整中心。
+4. 箱体大部分进入视野后，确认 `box_pose` 方向和位置在 `base_link` 下合理。
+5. 根据调试图逐步收紧 3D ROI 和运动阈值。
