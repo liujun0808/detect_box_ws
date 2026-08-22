@@ -29,5 +29,6 @@ set -u
 cd "${WORKSPACE_DIR}"
 
 # 检测节点收到服务请求后才通过 librealsense2 打开相机，节点空闲时不占用设备。
-# 使用 exec 让 systemd 直接监督 ROS 进程，并将 SIGINT 直接传给节点。
-exec ros2 run detect_pkg detect_server_node
+# 使用 launch 入口确保自动加载 box_position_estimation.yaml；
+# 使用 exec 让 systemd 直接监督 ROS 进程，并将 SIGINT 直接传给 launch。
+exec ros2 launch detect_pkg box_position_estimation.launch.py

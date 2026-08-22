@@ -12,12 +12,18 @@ from rclpy.node import Node
 from upper_limb_interface.srv import DetectAprilTag
 from visualization_msgs.msg import Marker
 
-from detect_pkg.box_position_estimator import (
+from detect_box_pipeline.box_position_estimator import (
     BoxPositionEstimator,
     PointCloudExtractionError,
+    PointCloudProcessingError,
+    PositionEstimationError,
 )
-from detect_pkg.realsense_camera import RealSenseCamera, RealSenseCameraError
-from detect_pkg.yolo_world_detector import YoloWorldDetector, YoloWorldDetectorError
+from detect_box_pipeline.debug_snapshot import DebugSnapshotWriter
+from detect_box_pipeline.realsense_camera import RealSenseCamera, RealSenseCameraError
+from detect_box_pipeline.yolo_world_detector import (
+    YoloWorldDetector,
+    YoloWorldDetectorError,
+)
 
 
 class DetectServerNode(Node):
@@ -61,6 +67,7 @@ class DetectServerNode(Node):
             camera_to_base,
             self._estimator_parameters(),
         )
+        self._debug_snapshot_writer = DebugSnapshotWriter(self._debug_parameters())
 
         self._marker_publisher = self.create_publisher(Marker, pose_topic, 1)
         self._service = self.create_service(
@@ -98,7 +105,13 @@ class DetectServerNode(Node):
         }
 
     def _estimator_parameters(self) -> dict[str, Any]:
-        prefixes = ("depth_", "pointcloud_", "support_plane_", "optimizer_")
+        prefixes = (
+            "depth_",
+            "pointcloud_",
+            "support_plane_",
+            "optimizer_",
+            "output_base_",
+        )
         return {
             parameter.name: parameter.value
             for parameter in self._parameters.values()
@@ -121,6 +134,17 @@ class DetectServerNode(Node):
             for name, default in defaults.items()
         }
 
+    def _debug_parameters(self) -> dict[str, Any]:
+        defaults = {
+            "debug_enabled": True,
+            "debug_output_dir": "debug_box_position",
+            "debug_max_snapshots": 10,
+        }
+        return {
+            name: self._parameter(name, default)
+            for name, default in defaults.items()
+        }
+
     def _handle_detect(
         self,
         request: DetectAprilTag.Request,
@@ -134,35 +158,73 @@ class DetectServerNode(Node):
         if not self._request_lock.acquire(blocking=False):
             response.message = "A detection request is already running"
             return response
+        frame = None
+        detection = None
+        point_cloud = None
+        processing = None
+        estimate = None
+        failure_message: str | None = None
         try:
             frame = self._camera.capture_aligned()
             detection = self._detector.detect_one(frame.color_bgr)
             if detection is None:
                 response.message = "RGB-D capture succeeded, but YOLO found no crate"
+                failure_message = response.message
                 return response
             point_cloud = self._estimator.extract_point_cloud(frame, detection)
+            processing = self._estimator.process_point_cloud(point_cloud)
+            estimate = self._estimator.estimate_from_processing(
+                frame,
+                detection,
+                processing,
+            )
+            response.success = True
+            response.box_pose = self._pose_from_center(estimate.center_base_m)
             response.message = (
-                "YOLO crate detection succeeded: "
+                "Box position estimation succeeded: "
                 f"class={detection.class_name}, "
                 f"confidence={detection.confidence:.3f}, "
                 f"bbox=[{detection.x_min},{detection.y_min},"
                 f"{detection.x_max},{detection.y_max}], "
-                f"roi={point_cloud.roi_xyxy}, "
-                f"points={point_cloud.points_camera_m.shape[0]}, "
-                f"depth_m=[{point_cloud.depths_m.min():.3f},"
-                f"{point_cloud.depths_m.max():.3f}]; "
-                "position fitting is not implemented yet"
+                f"center_base={estimate.center_base_m}, "
+                f"center_camera={estimate.center_camera_m}, "
+                f"points={estimate.point_count}, "
+                f"confidence={estimate.confidence:.3f}, "
+                f"surface_rmse_m={estimate.surface_rmse_m:.4f}, "
+                f"surface_inlier_ratio={estimate.surface_inlier_ratio:.3f}, "
+                f"support_plane={'valid' if estimate.support_plane_valid else 'not found'}"
             )
             return response
         except (
             RealSenseCameraError,
             YoloWorldDetectorError,
             PointCloudExtractionError,
+            PointCloudProcessingError,
+            PositionEstimationError,
         ) as error:
             response.message = str(error)
+            failure_message = response.message
             self.get_logger().error(response.message)
             return response
         finally:
+            if frame is not None:
+                try:
+                    snapshot_dir = self._debug_snapshot_writer.save(
+                        frame,
+                        detection,
+                        point_cloud,
+                        processing,
+                        estimate,
+                        failure_message,
+                    )
+                    if snapshot_dir is not None:
+                        self.get_logger().info(
+                            f"Debug snapshot saved: {snapshot_dir}"
+                        )
+                except Exception as error:  # pragma: no cover - filesystem/runtime issue
+                    self.get_logger().warning(
+                        f"Failed to save debug snapshot; detection result is preserved: {error}"
+                    )
             self._request_lock.release()
 
     @staticmethod
@@ -193,6 +255,15 @@ class DetectServerNode(Node):
         pose.orientation.y = data[4] / quaternion_norm
         pose.orientation.z = data[5] / quaternion_norm
         pose.orientation.w = data[6] / quaternion_norm
+        return pose
+
+    @staticmethod
+    def _pose_from_center(center_base: Sequence[float]) -> Pose:
+        pose = Pose()
+        pose.position.x, pose.position.y, pose.position.z = (
+            float(value) for value in center_base
+        )
+        pose.orientation.w = 1.0
         return pose
 
     def destroy_node(self) -> bool:

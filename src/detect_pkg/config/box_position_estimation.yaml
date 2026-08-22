@@ -1,30 +1,51 @@
+# 箱体检测与位置估计参数。
+# 使用 launch 启动时默认加载本文件；也可以通过 params_file 指定另一份 YAML。
+# 调参建议：先调整相机/深度和点云参数，再调整支撑平面，最后调整优化器。
 detect_server_node:
   ros__parameters:
+    # -------------------- ROS 接口 --------------------
+    # 服务接口保持原有 /detect，不要随意修改。
     service_name: /detect
+    # 当前保留原有 box_pose 话题配置；位置结果主要通过 /detect 服务返回。
     box_pose_topic: box_pose
     box_pose_frame_id: base_link
 
+    # -------------------- RealSense 相机 --------------------
+    # 多相机时填写设备序列号；单相机留空，自动选择设备。
     camera_serial_no: ""
+    # 必须与 D435 实际启动分辨率一致；修改分辨率后需要同步检查内参和 YOLO 输入。
     camera_width: 640
     camera_height: 480
+    # 帧率越高，取帧更及时，但 CPU/USB 负担更大。
     camera_fps: 30
+    # 相机启动后丢弃的预热帧数；首帧不稳定时可增大。
     camera_warmup_frames: 15
+    # 相机启动和单帧等待超时，单位 ms；设备较慢时可适当增大。
     camera_startup_timeout_ms: 5000
     camera_frame_timeout_ms: 1000
+    # true：服务请求结束后保持相机流；false：每次请求后关闭相机。
     camera_keep_running: true
+    # 停流后首帧超时是否尝试硬件复位；仅在相机偶发无帧时保持开启。
     camera_reset_on_start_failure: true
     camera_reset_reconnect_timeout_ms: 10000
     camera_reset_settle_ms: 2000
 
+    # -------------------- YOLO-World --------------------
+    # 权重文件必须位于该路径；当前默认运行在 py310 环境。
     yolo_model_path: /home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
+    # auto、cpu 或 cuda:0；现场 CPU 推理较慢时优先确认 CUDA 环境。
     yolo_device: auto
     yolo_image_size: 640
+    # 置信度过低会引入误检，过高会漏检；先从 0.25 附近调试。
     yolo_confidence_threshold: 0.25
+    # NMS 重叠阈值；多框重叠严重时再调整。
     yolo_iou_threshold: 0.45
     yolo_agnostic_nms: true
     yolo_max_detections: 10
+    # 检测框太小直接拒绝，避免小噪声进入深度流程。
     yolo_min_bbox_width_px: 20
     yolo_min_bbox_height_px: 20
+    # 从上到下依次是 YOLO-World 的箱体提示词；漏检时可增加同义词。
     yolo_class_prompts:
       - green plastic crate
       - plastic crate
@@ -33,45 +54,79 @@ detect_server_node:
       - green box
       - plastic container
 
+    # -------------------- 箱体先验 --------------------
+    # 箱体外部尺寸，单位 m；当前 3DoF 优化不会修改这些值。
     box_size_x_m: 0.295
     box_size_y_m: 0.395
     box_size_z_m: 0.225
 
+    # -------------------- 深度与点云 --------------------
+    # 深度有效范围，单位 m；深度空洞不在这里补齐。
+    # 点云太少时先检查范围是否把箱体误删，再降低 depth_min/depth_max 限制。
     depth_min_m: 0.30
     depth_max_m: 3.00
+    # YOLO 框向四周扩张的像素数；箱体边缘缺点时增大，背景过多时减小。
     depth_bbox_margin_px: 4
+    # 像素采样步长；减小可增加点数和精度，但会增加计算量。
     pointcloud_pixel_stride: 2
+    # ROI 中最少有效深度点数；部分可见时可适当降低，但误检风险会上升。
     pointcloud_min_points: 300
+    # SOR 的近邻数和标准差倍数；std_ratio 越小，离群点过滤越严格。
     pointcloud_statistical_neighbors: 20
     pointcloud_statistical_std_ratio: 1.5
+    # 3D 聚类邻域距离，单位 m；箱体被切成多个簇时增大，背景被合并时减小。
+    pointcloud_cluster_tolerance_m: 0.025
+    # 小于该点数的 3D 簇直接视为噪声。
+    pointcloud_min_cluster_points: 40
 
+    # -------------------- 传送带支撑平面 --------------------
+    # RANSAC 点到平面的最大距离，单位 m；D435 深度噪声大时可小幅增大。
     support_plane_distance_threshold_m: 0.012
+    # RANSAC 迭代次数；平面点比例较低时增大，但会增加耗时。
     support_plane_ransac_iterations: 300
+    # 平面内点占 ROI 点云的最小比例；bbox 经常不含传送带时不要设置过高。
     support_plane_min_inlier_ratio: 0.10
+    # 平面法向量与 base_link 期望竖直方向的最大夹角，单位 deg。
     support_plane_max_normal_angle_deg: 12.0
 
+    # -------------------- 3DoF 位置优化 --------------------
+    # 下面四项是相对权重，不是物理单位；优先保持 containment/support 较强。
     optimizer_surface_weight: 1.0
     optimizer_containment_weight: 2.0
     optimizer_support_weight: 4.0
     optimizer_bbox_weight: 0.25
+    # 所有优化残差统一使用同一种鲁棒损失；可选 soft_l1 或 huber。
+    optimizer_loss: soft_l1
+    # 鲁棒尺度，单位 m；越小越早降低大残差/异常点的影响。
     optimizer_robust_loss_scale_m: 0.020
+    # 非线性优化最大函数评估次数。
     optimizer_max_iterations: 200
+    # 表面残差超过该值则拒绝结果，单位 m。
     optimizer_max_surface_rmse_m: 0.035
+    # 通过固定尺寸模型质量检查的点比例下限。
     optimizer_min_surface_inlier_ratio: 0.35
 
+    # -------------------- 原有相机到 base_link 外参 --------------------
+    # 4x4 齐次矩阵，按行展开；本方案保留原接口和原外参含义，不要改成逆矩阵。
     camera_to_base_row_major:
       [0.0000, -0.342020, 0.939693, 0.12972,
        -1.000000, 0.000000, 0.000000, 0.03250,
        0.000000, -0.939693, -0.342020, 0.24561,
        0.000000, 0.000000, 0.000000, 1.000000]
 
+    # 输出位置的 base_link 工作空间限制，超出范围直接拒绝结果，单位 m。
     output_base_x_min_m: -2.0
     output_base_x_max_m: 2.0
     output_base_y_min_m: -2.0
     output_base_y_max_m: 2.0
     output_base_z_min_m: -0.2
     output_base_z_max_m: 2.0
+    # 失败时返回的 Pose：[x,y,z,qx,qy,qz,qw]；服务消息结构保持不变。
     fallback_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 
+    # 每次 /detect 请求保存一次调试快照；关闭后不写入图像和点云文件。
     debug_enabled: true
+    # 快照根目录；每次请求会在这里创建一个时间命名的子目录。
     debug_output_dir: /home/ub/project/detect_box_ws/debug_box_position
+    # 只保留最近 N 次请求，按目录修改时间删除更早的快照；当前需求为 10 次。
+    debug_max_snapshots: 10

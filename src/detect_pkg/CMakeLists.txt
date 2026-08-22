@@ -10,7 +10,7 @@ find_package(ament_cmake_python REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(upper_limb_interface REQUIRED)
 
-ament_python_install_package(${PROJECT_NAME})
+ament_python_install_package(detect_box_pipeline)
 
 add_executable(detect_client_node
   src/detect_client_node.cpp

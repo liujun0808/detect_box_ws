@@ -8,4 +8,4 @@ if [[ ! -x "${DETECT_BOX_PYTHON}" ]]; then
   exit 1
 fi
 
-exec "${DETECT_BOX_PYTHON}" -m detect_pkg.detect_server_node "$@"
+exec "${DETECT_BOX_PYTHON}" -m detect_box_pipeline.detect_server_node "$@"
