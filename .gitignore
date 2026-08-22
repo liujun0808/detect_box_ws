@@ -5,4 +5,4 @@
 /debug_box_position
 /models/*.pt
 !/models/.gitkeep
-/weights/
+/weights

@@ -18,8 +18,11 @@ detect_server_node:
     camera_height: 480
     # 帧率越高，取帧更及时，但 CPU/USB 负担更大。
     camera_fps: 30
-    # 相机启动后丢弃的预热帧数；首帧不稳定时可增大。
-    camera_warmup_frames: 15
+    # 相机首次启动后丢弃的预热帧数；自动曝光/白平衡不稳定时可增大。
+    camera_warmup_frames: 30
+    # 每次 /detect 请求额外丢弃的帧数，避免把请求开始后的首帧直接送入 YOLO。
+    # 30 FPS 下每增加 5 帧约增加 0.17 s 延迟；画面仍不稳定时优先增大到 10 或 15。
+    camera_request_discard_frames: 5
     # 相机启动和单帧等待超时，单位 ms；设备较慢时可适当增大。
     camera_startup_timeout_ms: 5000
     camera_frame_timeout_ms: 1000
@@ -79,6 +82,26 @@ detect_server_node:
     # 小于该点数的 3D 簇直接视为噪声。
     pointcloud_min_cluster_points: 40
 
+    # -------------------- 箱体远侧内壁平面 --------------------
+    # 远侧内壁法向对应的箱体局部轴；当前箱体布置默认使用 base_link X 轴。
+    # 若现场确认可见内壁是另一组相对面，可改为 y。
+    inner_wall_axis: x
+    # 点到内壁平面的最大距离，单位 m；D435 噪声较大时可小幅增大。
+    inner_wall_distance_threshold_m: 0.015
+    # 内壁 RANSAC 迭代次数；内壁点较少或杂点较多时可增大。
+    inner_wall_ransac_iterations: 300
+    # 内壁内点占最终候选簇的最小比例；内壁只露出一部分时可降低。
+    inner_wall_min_inlier_ratio: 0.05
+    # 拟合平面法向与名义箱体轴的最大夹角，单位 deg。
+    inner_wall_max_normal_angle_deg: 15.0
+    # 优先从候选簇中较远的一侧搜索内壁；0.55 表示搜索最远侧约 45% 点。
+    inner_wall_far_quantile: 0.55
+    # 实测法向只用于验证箱体姿态偏差；优化中心时仍使用固定外参推导的名义轴向。
+    # 内壁点云竖直跨度至少达到箱体高度的该比例时，才启用上边界候选。
+    inner_wall_min_vertical_span_ratio: 0.35
+    # 从内壁点云竖直坐标的高分位估计可见上边界，避免使用单个噪声点。
+    inner_wall_top_quantile: 0.98
+
     # -------------------- 传送带支撑平面 --------------------
     # RANSAC 点到平面的最大距离，单位 m；D435 深度噪声大时可小幅增大。
     support_plane_distance_threshold_m: 0.012
@@ -95,6 +118,13 @@ detect_server_node:
     optimizer_containment_weight: 2.0
     optimizer_support_weight: 4.0
     optimizer_bbox_weight: 0.25
+    # bbox 边距离图像边界小于该像素范围时，逐渐降低完整边界匹配权重。
+    # 触碰边界的边仍要求模型覆盖可见 bbox，但允许模型继续延伸到画面外。
+    optimizer_bbox_clip_transition_px: 30.0
+    # 远侧内壁平面残差的相对权重；拟合到可靠内壁后用于约束箱体中心。
+    optimizer_inner_wall_weight: 2.0
+    # 远侧内壁上边界残差的相对权重；仅在竖直跨度足够时启用。
+    optimizer_inner_wall_top_weight: 1.0
     # 所有优化残差统一使用同一种鲁棒损失；可选 soft_l1 或 huber。
     optimizer_loss: soft_l1
     # 鲁棒尺度，单位 m；越小越早降低大残差/异常点的影响。
@@ -104,7 +134,7 @@ detect_server_node:
     # 表面残差超过该值则拒绝结果，单位 m。
     optimizer_max_surface_rmse_m: 0.035
     # 通过固定尺寸模型质量检查的点比例下限。
-    optimizer_min_surface_inlier_ratio: 0.35
+    optimizer_min_surface_inlier_ratio: 0.15
 
     # -------------------- 原有相机到 base_link 外参 --------------------
     # 4x4 齐次矩阵，按行展开；本方案保留原接口和原外参含义，不要改成逆矩阵。

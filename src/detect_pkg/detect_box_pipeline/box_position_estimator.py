@@ -75,6 +75,25 @@ class SupportPlane:
 
 
 @dataclass(frozen=True)
+class InnerWallPlane:
+    """A validated far inner wall of the box in camera coordinates."""
+
+    # Raw plane normal estimated from the point cloud. It is used for
+    # validation only because the center optimizer keeps the nominal pose.
+    normal_camera: tuple[float, float, float]
+    # Fixed-pose normal derived from the configured camera/base rotation.
+    nominal_normal_camera: tuple[float, float, float]
+    offset: float
+    inlier_mask: np.ndarray
+    inlier_count: int
+    inlier_ratio: float
+    normal_angle_deg: float
+    local_axis_index: int
+    top_edge_coordinate: float | None
+    top_edge_span_m: float
+
+
+@dataclass(frozen=True)
 class PointCloudProcessingResult:
     """Filtered cloud, cluster candidates and the selected main candidate."""
 
@@ -85,6 +104,7 @@ class PointCloudProcessingResult:
     selected_cluster: PointCloudCluster
     selected_cloud: CameraPointCloud
     sor_removed_count: int
+    inner_wall_plane: InnerWallPlane | None
 
 
 @dataclass(frozen=True)
@@ -98,6 +118,7 @@ class PositionEstimate:
     support_plane_valid: bool
     surface_rmse_m: float
     surface_inlier_ratio: float
+    inner_wall_valid: bool
 
 
 class BoxPositionEstimator:
@@ -148,6 +169,39 @@ class BoxPositionEstimator:
             parameters["optimizer_support_weight"]
         )
         self._optimizer_bbox_weight = float(parameters["optimizer_bbox_weight"])
+        self._optimizer_bbox_clip_transition_px = float(
+            parameters.get("optimizer_bbox_clip_transition_px", 30.0)
+        )
+        self._optimizer_inner_wall_weight = float(
+            parameters.get("optimizer_inner_wall_weight", 2.0)
+        )
+        self._optimizer_inner_wall_top_weight = float(
+            parameters.get("optimizer_inner_wall_top_weight", 1.0)
+        )
+        self._inner_wall_axis = str(
+            parameters.get("inner_wall_axis", "x")
+        ).strip().lower()
+        self._inner_wall_distance_threshold_m = float(
+            parameters.get("inner_wall_distance_threshold_m", 0.015)
+        )
+        self._inner_wall_ransac_iterations = int(
+            parameters.get("inner_wall_ransac_iterations", 300)
+        )
+        self._inner_wall_min_inlier_ratio = float(
+            parameters.get("inner_wall_min_inlier_ratio", 0.05)
+        )
+        self._inner_wall_max_normal_angle_deg = float(
+            parameters.get("inner_wall_max_normal_angle_deg", 15.0)
+        )
+        self._inner_wall_far_quantile = float(
+            parameters.get("inner_wall_far_quantile", 0.55)
+        )
+        self._inner_wall_top_quantile = float(
+            parameters.get("inner_wall_top_quantile", 0.98)
+        )
+        self._inner_wall_min_vertical_span_ratio = float(
+            parameters.get("inner_wall_min_vertical_span_ratio", 0.35)
+        )
         self._optimizer_robust_scale_m = float(
             parameters["optimizer_robust_loss_scale_m"]
         )
@@ -301,6 +355,7 @@ class BoxPositionEstimator:
         # Cluster indices refer to candidate_cloud, which may already exclude
         # support-plane points; keep the saved cloud aligned with the optimizer input.
         selected_cloud = candidate_cloud.subset(selected_cluster.indices)
+        inner_wall_plane = self.fit_inner_wall(selected_cloud)
         return PointCloudProcessingResult(
             filtered_cloud=filtered_cloud,
             candidate_cloud=candidate_cloud,
@@ -312,6 +367,7 @@ class BoxPositionEstimator:
                 point_cloud.points_camera_m.shape[0]
                 - filtered_cloud.points_camera_m.shape[0]
             ),
+            inner_wall_plane=inner_wall_plane,
         )
 
     def fit_support_plane(
@@ -387,6 +443,123 @@ class BoxPositionEstimator:
             inlier_count=refined_count,
             inlier_ratio=float(refined_ratio),
             normal_angle_deg=float(angle_deg),
+        )
+
+    def fit_inner_wall(
+        self, point_cloud: CameraPointCloud
+    ) -> InnerWallPlane | None:
+        """Fit the far inner wall using the nominal horizontal box axis."""
+        points = np.asarray(point_cloud.points_camera_m, dtype=np.float64)
+        if points.shape[0] < 3:
+            return None
+
+        axis_index = {"x": 0, "y": 1}.get(self._inner_wall_axis)
+        if axis_index is None:
+            return None
+        wall_axis_camera = self._rotation_camera_from_box[:, axis_index]
+        axis_norm = float(np.linalg.norm(wall_axis_camera))
+        if axis_norm <= 1.0e-9:
+            return None
+        wall_axis_camera /= axis_norm
+        far_sign = 1.0 if wall_axis_camera[2] >= 0.0 else -1.0
+        expected_normal = far_sign * wall_axis_camera
+        far_coordinate = points @ expected_normal
+        far_threshold = float(
+            np.quantile(far_coordinate, self._inner_wall_far_quantile)
+        )
+        far_indices = np.flatnonzero(far_coordinate >= far_threshold)
+        if far_indices.size < 3:
+            return None
+        far_points = points[far_indices]
+
+        rng = np.random.default_rng(1)
+        cos_limit = math.cos(math.radians(self._inner_wall_max_normal_angle_deg))
+        best_mask: np.ndarray | None = None
+        best_normal: np.ndarray | None = None
+        best_offset = 0.0
+        best_count = 0
+        for _ in range(self._inner_wall_ransac_iterations):
+            sample_indices = rng.choice(far_points.shape[0], size=3, replace=False)
+            p1, p2, p3 = far_points[sample_indices]
+            normal = np.cross(p2 - p1, p3 - p1)
+            normal_norm = float(np.linalg.norm(normal))
+            if normal_norm <= 1.0e-9:
+                continue
+            normal /= normal_norm
+            alignment = float(abs(normal @ expected_normal))
+            if alignment < cos_limit:
+                continue
+            if float(normal @ expected_normal) < 0.0:
+                normal = -normal
+            offset = -float(normal @ p1)
+            distances = np.abs(far_points @ normal + offset)
+            mask = distances <= self._inner_wall_distance_threshold_m
+            count = int(np.count_nonzero(mask))
+            if count > best_count:
+                best_count = count
+                best_mask = mask
+                best_normal = normal
+                best_offset = offset
+
+        min_inliers = max(
+            3,
+            int(math.ceil(self._inner_wall_min_inlier_ratio * points.shape[0])),
+        )
+        if best_mask is None or best_normal is None or best_count < min_inliers:
+            return None
+
+        inlier_points = far_points[best_mask]
+        center = inlier_points.mean(axis=0)
+        _, _, vh = np.linalg.svd(inlier_points - center, full_matrices=False)
+        refined_normal = vh[-1]
+        if float(refined_normal @ expected_normal) < 0.0:
+            refined_normal = -refined_normal
+        refined_normal /= float(np.linalg.norm(refined_normal))
+        refined_offset = -float(refined_normal @ center)
+        refined_distances = np.abs(points @ refined_normal + refined_offset)
+        refined_mask = refined_distances <= self._inner_wall_distance_threshold_m
+        refined_count = int(np.count_nonzero(refined_mask))
+        refined_ratio = refined_count / points.shape[0]
+        angle_cos = float(
+            np.clip(refined_normal @ expected_normal, -1.0, 1.0)
+        )
+        angle_deg = math.degrees(math.acos(angle_cos))
+        if (
+            refined_count < min_inliers
+            or angle_deg > self._inner_wall_max_normal_angle_deg
+        ):
+            return None
+        # Keep the measured plane location, but express its equation with the
+        # nominal fixed-pose normal. This prevents a small box tilt from being
+        # misinterpreted as a large center shift along the coupled Y/Z axes.
+        nominal_offset = -float(expected_normal @ points[refined_mask].mean(axis=0))
+        nominal_z_axis = self._rotation_camera_from_box[:, 2]
+        wall_height_coordinates = points[refined_mask] @ nominal_z_axis
+        top_edge_span_m = float(
+            wall_height_coordinates.max() - wall_height_coordinates.min()
+        )
+        min_vertical_span_m = (
+            self._inner_wall_min_vertical_span_ratio * self.box_size_m[2]
+        )
+        top_edge_coordinate = None
+        if top_edge_span_m >= min_vertical_span_m:
+            top_edge_coordinate = float(
+                np.quantile(
+                    wall_height_coordinates,
+                    self._inner_wall_top_quantile,
+                )
+            )
+        return InnerWallPlane(
+            normal_camera=tuple(float(value) for value in refined_normal),
+            nominal_normal_camera=tuple(float(value) for value in expected_normal),
+            offset=nominal_offset,
+            inlier_mask=refined_mask,
+            inlier_count=refined_count,
+            inlier_ratio=float(refined_ratio),
+            normal_angle_deg=float(angle_deg),
+            local_axis_index=axis_index,
+            top_edge_coordinate=top_edge_coordinate,
+            top_edge_span_m=top_edge_span_m,
         )
 
     def remove_statistical_outliers(
@@ -535,6 +708,7 @@ class BoxPositionEstimator:
             bbox,
             camera_intrinsics,
             processing.support_plane,
+            processing.inner_wall_plane,
         )
         best_result: Any | None = None
         best_cost = float("inf")
@@ -549,6 +723,7 @@ class BoxPositionEstimator:
                     camera_intrinsics,
                     (image_width, image_height),
                     processing.support_plane,
+                    processing.inner_wall_plane,
                 ),
                 bounds=bounds,
                 loss=self._optimizer_loss,
@@ -618,6 +793,7 @@ class BoxPositionEstimator:
             support_plane_valid=processing.support_plane is not None,
             surface_rmse_m=metrics["surface_rmse_m"],
             surface_inlier_ratio=metrics["surface_inlier_ratio"],
+            inner_wall_valid=processing.inner_wall_plane is not None,
         )
 
     def _initial_center_candidates(
@@ -626,6 +802,7 @@ class BoxPositionEstimator:
         bbox: np.ndarray,
         intrinsics: tuple[float, float, float, float],
         support_plane: SupportPlane | None,
+        inner_wall_plane: InnerWallPlane | None,
     ) -> tuple[np.ndarray, ...]:
         fx, fy, cx, cy = intrinsics
         u_center = 0.5 * (bbox[0] + bbox[2])
@@ -659,6 +836,29 @@ class BoxPositionEstimator:
                     + support_plane.offset
                 )
                 seeds.append(seed + correction * normal)
+
+        if inner_wall_plane is not None:
+            normal = np.asarray(
+                inner_wall_plane.nominal_normal_camera, dtype=np.float64
+            )
+            wall_half_size = 0.5 * self.box_size_m[inner_wall_plane.local_axis_index]
+            for seed in tuple(seeds):
+                # The fitted plane is the far face, so n^T C + d + h = 0.
+                correction = -(
+                    float(normal @ seed)
+                    + inner_wall_plane.offset
+                    + wall_half_size
+                )
+                seeds.append(seed + correction * normal)
+            if inner_wall_plane.top_edge_coordinate is not None:
+                box_z_axis = self._rotation_camera_from_box[:, 2]
+                for seed in tuple(seeds):
+                    correction = -float(
+                        box_z_axis @ seed
+                        + 0.5 * self.box_size_m[2]
+                        - inner_wall_plane.top_edge_coordinate
+                    )
+                    seeds.append(seed + correction * box_z_axis)
         return tuple(seeds)
 
     def _optimization_bounds(
@@ -667,8 +867,35 @@ class BoxPositionEstimator:
         margin = max(0.20, 2.0 * max(self.box_size_m))
         lower = points.min(axis=0) - margin
         upper = points.max(axis=0) + margin
-        lower[2] = max(self._depth_min_m, 0.05) + max(self.box_size_m)
-        upper[2] = max(upper[2], self._depth_max_m + max(self.box_size_m))
+        half_size = 0.5 * np.asarray(self.box_size_m, dtype=np.float64)
+        signs = np.array(
+            [
+                [-1.0, -1.0, -1.0],
+                [-1.0, -1.0, 1.0],
+                [-1.0, 1.0, -1.0],
+                [-1.0, 1.0, 1.0],
+                [1.0, -1.0, -1.0],
+                [1.0, -1.0, 1.0],
+                [1.0, 1.0, -1.0],
+                [1.0, 1.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        box_corner_offsets_camera = (
+            signs * half_size
+        ) @ self._rotation_camera_from_box.T
+        camera_z_extent = float(np.max(np.abs(box_corner_offsets_camera[:, 2])))
+        # The center only needs to keep every model corner in front of the
+        # camera; it must not be forced to depth_min + max(box_size).
+        lower[2] = max(
+            0.05 + camera_z_extent,
+            points[:, 2].min() - camera_z_extent,
+        )
+        upper[2] = max(
+            upper[2],
+            points[:, 2].max() + camera_z_extent,
+            self._depth_max_m + camera_z_extent,
+        )
         return lower, upper
 
     def _optimization_residuals(
@@ -679,6 +906,7 @@ class BoxPositionEstimator:
         intrinsics: tuple[float, float, float, float],
         image_size: tuple[int, int],
         support_plane: SupportPlane | None,
+        inner_wall_plane: InnerWallPlane | None,
     ) -> np.ndarray:
         q = self._box_local_points(points, center_camera)
         half_size = 0.5 * np.asarray(self.box_size_m, dtype=np.float64)
@@ -717,13 +945,66 @@ class BoxPositionEstimator:
                 )
             )
 
+        if inner_wall_plane is not None:
+            normal = np.asarray(
+                inner_wall_plane.nominal_normal_camera, dtype=np.float64
+            )
+            wall_half_size = 0.5 * self.box_size_m[inner_wall_plane.local_axis_index]
+            wall_residual = float(
+                normal @ center_camera
+                + inner_wall_plane.offset
+                + wall_half_size
+            )
+            residuals.append(
+                np.array(
+                    [
+                        math.sqrt(self._optimizer_inner_wall_weight)
+                        * wall_residual
+                        / self._optimizer_robust_scale_m
+                    ],
+                    dtype=np.float64,
+                )
+            )
+            if inner_wall_plane.top_edge_coordinate is not None:
+                box_z_axis = self._rotation_camera_from_box[:, 2]
+                top_residual = float(
+                    box_z_axis @ center_camera
+                    + half_size[2]
+                    - inner_wall_plane.top_edge_coordinate
+                )
+                residuals.append(
+                    np.array(
+                        [
+                            math.sqrt(self._optimizer_inner_wall_top_weight)
+                            * top_residual
+                            / self._optimizer_robust_scale_m
+                        ],
+                        dtype=np.float64,
+                    )
+                )
+
         model_bbox = self._projected_model_bbox(
             center_camera, intrinsics, image_size
         )
         bbox_scale_px = max(20.0, 0.05 * max(image_size))
+        bbox_cover = np.maximum(
+            np.array(
+                [
+                    model_bbox[0] - bbox[0],
+                    model_bbox[1] - bbox[1],
+                    bbox[2] - model_bbox[2],
+                    bbox[3] - model_bbox[3],
+                ],
+                dtype=np.float64,
+            ),
+            0.0,
+        )
+        bbox_fit = self._bbox_visibility_weights(bbox, image_size) * (
+            model_bbox - bbox
+        )
         residuals.append(
             math.sqrt(self._optimizer_bbox_weight)
-            * (model_bbox - bbox)
+            * (bbox_cover + bbox_fit)
             / bbox_scale_px
         )
         return np.concatenate(residuals)
@@ -750,11 +1031,48 @@ class BoxPositionEstimator:
         model_bbox = self._projected_model_bbox(
             center_camera, intrinsics, image_size
         )
+        visible_model_bbox = self._clip_bbox_to_image(model_bbox, image_size)
         return {
             "surface_rmse_m": float(np.sqrt(np.mean(surface_residual**2))),
             "surface_inlier_ratio": float(np.mean(inlier_mask)),
-            "bbox_iou": self._bbox_iou(model_bbox, bbox),
+            "bbox_iou": self._bbox_iou(visible_model_bbox, bbox),
         }
+
+    def _bbox_visibility_weights(
+        self,
+        bbox: np.ndarray,
+        image_size: tuple[int, int],
+    ) -> np.ndarray:
+        """Reduce equality matching near image borders without hard branching."""
+        image_width, image_height = image_size
+        transition = self._optimizer_bbox_clip_transition_px
+        return np.clip(
+            np.array(
+                [
+                    bbox[0],
+                    bbox[1],
+                    image_width - bbox[2],
+                    image_height - bbox[3],
+                ],
+                dtype=np.float64,
+            )
+            / transition,
+            0.0,
+            1.0,
+        )
+
+    @staticmethod
+    def _clip_bbox_to_image(
+        bbox: np.ndarray,
+        image_size: tuple[int, int],
+    ) -> np.ndarray:
+        image_width, image_height = image_size
+        clipped = np.asarray(bbox, dtype=np.float64).copy()
+        clipped[[0, 2]] = np.clip(clipped[[0, 2]], 0.0, float(image_width))
+        clipped[[1, 3]] = np.clip(clipped[[1, 3]], 0.0, float(image_height))
+        if clipped[2] < clipped[0] or clipped[3] < clipped[1]:
+            return np.zeros(4, dtype=np.float64)
+        return clipped
 
     def _box_local_points(
         self, points: np.ndarray, center_camera: np.ndarray
@@ -874,6 +1192,8 @@ class BoxPositionEstimator:
             self._optimizer_containment_weight,
             self._optimizer_support_weight,
             self._optimizer_bbox_weight,
+            self._optimizer_inner_wall_weight,
+            self._optimizer_inner_wall_top_weight,
         )
         if not all(np.isfinite(value) and value >= 0.0 for value in optimizer_weights):
             raise ValueError("optimizer weights must be finite and non-negative")
@@ -895,6 +1215,47 @@ class BoxPositionEstimator:
         ):
             raise ValueError(
                 "optimizer_min_surface_inlier_ratio must be in [0, 1]"
+            )
+        if (
+            not np.isfinite(self._optimizer_bbox_clip_transition_px)
+            or self._optimizer_bbox_clip_transition_px <= 0.0
+        ):
+            raise ValueError("optimizer_bbox_clip_transition_px must be positive")
+        if self._inner_wall_axis not in {"x", "y"}:
+            raise ValueError("inner_wall_axis must be x or y")
+        if (
+            not np.isfinite(self._inner_wall_distance_threshold_m)
+            or self._inner_wall_distance_threshold_m <= 0.0
+        ):
+            raise ValueError("inner_wall_distance_threshold_m must be positive")
+        if self._inner_wall_ransac_iterations <= 0:
+            raise ValueError("inner_wall_ransac_iterations must be positive")
+        if (
+            not np.isfinite(self._inner_wall_min_inlier_ratio)
+            or not 0.0 < self._inner_wall_min_inlier_ratio <= 1.0
+        ):
+            raise ValueError("inner_wall_min_inlier_ratio must be in (0, 1]")
+        if (
+            not np.isfinite(self._inner_wall_max_normal_angle_deg)
+            or not 0.0 <= self._inner_wall_max_normal_angle_deg <= 90.0
+        ):
+            raise ValueError("inner_wall_max_normal_angle_deg must be in [0, 90]")
+        if (
+            not np.isfinite(self._inner_wall_far_quantile)
+            or not 0.0 < self._inner_wall_far_quantile < 1.0
+        ):
+            raise ValueError("inner_wall_far_quantile must be in (0, 1)")
+        if (
+            not np.isfinite(self._inner_wall_top_quantile)
+            or not 0.5 < self._inner_wall_top_quantile < 1.0
+        ):
+            raise ValueError("inner_wall_top_quantile must be in (0.5, 1)")
+        if (
+            not np.isfinite(self._inner_wall_min_vertical_span_ratio)
+            or not 0.0 < self._inner_wall_min_vertical_span_ratio <= 1.0
+        ):
+            raise ValueError(
+                "inner_wall_min_vertical_span_ratio must be in (0, 1]"
             )
         if self._optimizer_loss not in {"soft_l1", "huber"}:
             raise ValueError("optimizer_loss must be soft_l1 or huber")

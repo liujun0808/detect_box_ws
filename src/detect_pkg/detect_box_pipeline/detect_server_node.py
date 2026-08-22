@@ -91,7 +91,8 @@ class DetectServerNode(Node):
             "camera_width": 640,
             "camera_height": 480,
             "camera_fps": 30,
-            "camera_warmup_frames": 15,
+            "camera_warmup_frames": 30,
+            "camera_request_discard_frames": 5,
             "camera_startup_timeout_ms": 5000,
             "camera_frame_timeout_ms": 1000,
             "camera_keep_running": True,
@@ -109,6 +110,7 @@ class DetectServerNode(Node):
             "depth_",
             "pointcloud_",
             "support_plane_",
+            "inner_wall_",
             "optimizer_",
             "output_base_",
         )
@@ -163,13 +165,11 @@ class DetectServerNode(Node):
         point_cloud = None
         processing = None
         estimate = None
-        failure_message: str | None = None
         try:
             frame = self._camera.capture_aligned()
             detection = self._detector.detect_one(frame.color_bgr)
             if detection is None:
                 response.message = "RGB-D capture succeeded, but YOLO found no crate"
-                failure_message = response.message
                 return response
             point_cloud = self._estimator.extract_point_cloud(frame, detection)
             processing = self._estimator.process_point_cloud(point_cloud)
@@ -192,7 +192,14 @@ class DetectServerNode(Node):
                 f"confidence={estimate.confidence:.3f}, "
                 f"surface_rmse_m={estimate.surface_rmse_m:.4f}, "
                 f"surface_inlier_ratio={estimate.surface_inlier_ratio:.3f}, "
-                f"support_plane={'valid' if estimate.support_plane_valid else 'not found'}"
+                f"support_plane={'valid' if estimate.support_plane_valid else 'not found'}, "
+                f"inner_wall={'valid' if estimate.inner_wall_valid else 'not found'}"
+            )
+            self.get_logger().info(
+                "Box center in camera frame: "
+                f"x={estimate.center_camera_m[0]:.4f} m, "
+                f"y={estimate.center_camera_m[1]:.4f} m, "
+                f"z={estimate.center_camera_m[2]:.4f} m"
             )
             return response
         except (
@@ -203,7 +210,6 @@ class DetectServerNode(Node):
             PositionEstimationError,
         ) as error:
             response.message = str(error)
-            failure_message = response.message
             self.get_logger().error(response.message)
             return response
         finally:
@@ -214,8 +220,6 @@ class DetectServerNode(Node):
                         detection,
                         point_cloud,
                         processing,
-                        estimate,
-                        failure_message,
                     )
                     if snapshot_dir is not None:
                         self.get_logger().info(

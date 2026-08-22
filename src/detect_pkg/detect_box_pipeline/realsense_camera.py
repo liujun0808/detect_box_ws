@@ -34,6 +34,9 @@ class RealSenseCamera:
         self._height = int(parameters["camera_height"])
         self._fps = int(parameters["camera_fps"])
         self._warmup_frames = int(parameters["camera_warmup_frames"])
+        self._request_discard_frames = int(
+            parameters.get("camera_request_discard_frames", 0)
+        )
         self._startup_timeout_ms = int(parameters["camera_startup_timeout_ms"])
         self._frame_timeout_ms = int(parameters["camera_frame_timeout_ms"])
         self._keep_running = bool(parameters["camera_keep_running"])
@@ -67,6 +70,10 @@ class RealSenseCamera:
         with self._lock:
             self._start_locked()
             try:
+                # Each service request gets a fresh settled frame instead of
+                # reusing the first frame after a request or stream start.
+                for _ in range(self._request_discard_frames):
+                    self._wait_for_aligned_frames_locked()
                 frames = self._wait_for_aligned_frames_locked()
                 color_frame = frames.get_color_frame()
                 depth_frame = frames.get_depth_frame()
@@ -272,6 +279,8 @@ class RealSenseCamera:
             raise ValueError("camera_width, camera_height and camera_fps must be positive")
         if self._warmup_frames < 0:
             raise ValueError("camera_warmup_frames cannot be negative")
+        if self._request_discard_frames < 0:
+            raise ValueError("camera_request_discard_frames cannot be negative")
         if self._startup_timeout_ms <= 0:
             raise ValueError("camera_startup_timeout_ms must be positive")
         if self._frame_timeout_ms <= 0:
