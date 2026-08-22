@@ -2,3 +2,7 @@
 /install
 /log
 /debug_img
+/debug_box_position
+/models/*.pt
+!/models/.gitkeep
+/weights/

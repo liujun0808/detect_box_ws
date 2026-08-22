@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -e
+
+DETECT_BOX_PYTHON="${DETECT_BOX_PYTHON:-/home/ub/miniconda3/envs/py310/bin/python}"
+
+if [[ ! -x "${DETECT_BOX_PYTHON}" ]]; then
+  echo "Python executable not found: ${DETECT_BOX_PYTHON}" >&2
+  exit 1
+fi
+
+exec "${DETECT_BOX_PYTHON}" -m detect_pkg.detect_server_node "$@"

@@ -1,0 +1,77 @@
+detect_server_node:
+  ros__parameters:
+    service_name: /detect
+    box_pose_topic: box_pose
+    box_pose_frame_id: base_link
+
+    camera_serial_no: ""
+    camera_width: 640
+    camera_height: 480
+    camera_fps: 30
+    camera_warmup_frames: 15
+    camera_startup_timeout_ms: 5000
+    camera_frame_timeout_ms: 1000
+    camera_keep_running: true
+    camera_reset_on_start_failure: true
+    camera_reset_reconnect_timeout_ms: 10000
+    camera_reset_settle_ms: 2000
+
+    yolo_model_path: /home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
+    yolo_device: auto
+    yolo_image_size: 640
+    yolo_confidence_threshold: 0.25
+    yolo_iou_threshold: 0.45
+    yolo_agnostic_nms: true
+    yolo_max_detections: 10
+    yolo_min_bbox_width_px: 20
+    yolo_min_bbox_height_px: 20
+    yolo_class_prompts:
+      - green plastic crate
+      - plastic crate
+      - storage crate
+      - green storage box
+      - green box
+      - plastic container
+
+    box_size_x_m: 0.295
+    box_size_y_m: 0.395
+    box_size_z_m: 0.225
+
+    depth_min_m: 0.30
+    depth_max_m: 3.00
+    depth_bbox_margin_px: 4
+    pointcloud_pixel_stride: 2
+    pointcloud_min_points: 300
+    pointcloud_statistical_neighbors: 20
+    pointcloud_statistical_std_ratio: 1.5
+
+    support_plane_distance_threshold_m: 0.012
+    support_plane_ransac_iterations: 300
+    support_plane_min_inlier_ratio: 0.10
+    support_plane_max_normal_angle_deg: 12.0
+
+    optimizer_surface_weight: 1.0
+    optimizer_containment_weight: 2.0
+    optimizer_support_weight: 4.0
+    optimizer_bbox_weight: 0.25
+    optimizer_robust_loss_scale_m: 0.020
+    optimizer_max_iterations: 200
+    optimizer_max_surface_rmse_m: 0.035
+    optimizer_min_surface_inlier_ratio: 0.35
+
+    camera_to_base_row_major:
+      [0.0000, -0.342020, 0.939693, 0.12972,
+       -1.000000, 0.000000, 0.000000, 0.03250,
+       0.000000, -0.939693, -0.342020, 0.24561,
+       0.000000, 0.000000, 0.000000, 1.000000]
+
+    output_base_x_min_m: -2.0
+    output_base_x_max_m: 2.0
+    output_base_y_min_m: -2.0
+    output_base_y_max_m: 2.0
+    output_base_z_min_m: -0.2
+    output_base_z_max_m: 2.0
+    fallback_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+    debug_enabled: true
+    debug_output_dir: /home/ub/project/detect_box_ws/debug_box_position

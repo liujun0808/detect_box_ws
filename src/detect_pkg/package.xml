@@ -8,16 +8,15 @@
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>geometry_msgs</depend>
   <depend>rclcpp</depend>
   <depend>upper_limb_interface</depend>
   <depend>visualization_msgs</depend>
-  <depend>opencv</depend>
-  <depend>librealsense2</depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>librealsense2</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
-  <exec_depend>realsense2_camera</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 
