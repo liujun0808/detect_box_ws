@@ -24,8 +24,8 @@ class DebugSnapshotWriter:
         self,
         frame: Any,
         detection: Any | None = None,
-        point_cloud: Any | None = None,
         processing: Any | None = None,
+        center_camera_m: Any | None = None,
     ) -> Path | None:
         """Save available data for one request and return its directory."""
         if not self._enabled or self._root_dir is None:
@@ -41,20 +41,22 @@ class DebugSnapshotWriter:
             self._draw_detection(annotated, detection)
             self._write_image(snapshot_dir / "color_with_yolo_bbox.png", annotated)
 
-        depth_u16 = np.asarray(frame.depth_u16)
-        self._write_image(snapshot_dir / "depth_u16.png", depth_u16)
-
-        if point_cloud is not None:
-            self._write_ply(
-                snapshot_dir / "yolo_roi_cloud.ply",
-                point_cloud.points_camera_m,
-                self._cloud_colors_bgr(frame, point_cloud),
-            )
         if processing is not None:
+            points = np.asarray(processing.selected_cloud.points_camera_m, dtype=np.float32)
+            colors = self._cloud_colors_bgr(frame, processing.selected_cloud)
+            if center_camera_m is not None:
+                center = np.asarray(center_camera_m, dtype=np.float32)
+                if center.shape == (3,) and np.all(np.isfinite(center)):
+                    # Append one red vertex so CloudCompare can display the estimate
+                    # in the same camera-frame cloud without a virtual box model.
+                    points = np.vstack((points, center[None, :]))
+                    colors = np.vstack(
+                        (colors, np.array([[0, 0, 255]], dtype=np.uint8))
+                    )
             self._write_ply(
                 snapshot_dir / "final_candidate_cloud.ply",
-                processing.selected_cloud.points_camera_m,
-                self._cloud_colors_bgr(frame, processing.selected_cloud),
+                points,
+                colors,
             )
         self._remove_old_snapshots()
         return snapshot_dir

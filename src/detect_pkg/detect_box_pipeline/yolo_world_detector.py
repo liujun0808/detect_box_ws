@@ -52,6 +52,7 @@ class YoloWorldDetector:
 
         self._model: Any | None = None
         self._load_lock = threading.Lock()
+        self._last_inference_device: str | None = None
 
     @property
     def loaded(self) -> bool:
@@ -64,6 +65,25 @@ class YoloWorldDetector:
     @property
     def class_prompts(self) -> tuple[str, ...]:
         return self._class_prompts
+
+    @property
+    def resolved_device(self) -> str:
+        """Return the device passed to Ultralytics after auto resolution."""
+        return self._device
+
+    @property
+    def resolved_device_label(self) -> str:
+        device = self._device.strip().lower()
+        if device.isdigit():
+            return f"cuda:{device}"
+        if device == "cuda":
+            return "cuda:0"
+        return self._device
+
+    @property
+    def last_inference_device(self) -> str | None:
+        """Return the tensor device observed on the last completed inference."""
+        return self._last_inference_device
 
     def detect_one(self, color_bgr: Any) -> BoxDetection | None:
         image = self._validate_image(color_bgr)
@@ -88,6 +108,10 @@ class YoloWorldDetector:
             return None
 
         boxes = results[0].boxes
+        try:
+            self._last_inference_device = str(boxes.xyxy.device)
+        except Exception:
+            self._last_inference_device = self.resolved_device_label
         xyxy = boxes.xyxy.detach().cpu().numpy()
         confidences = boxes.conf.detach().cpu().numpy()
         class_indices = boxes.cls.detach().cpu().numpy().astype(np.int64)

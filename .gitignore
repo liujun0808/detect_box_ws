@@ -6,3 +6,4 @@
 /models/*.pt
 !/models/.gitkeep
 /weights
+/参考ply

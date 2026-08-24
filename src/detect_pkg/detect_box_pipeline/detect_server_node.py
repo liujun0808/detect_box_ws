@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from typing import Any, Sequence
 
 import rclpy
@@ -109,8 +110,9 @@ class DetectServerNode(Node):
         prefixes = (
             "depth_",
             "pointcloud_",
-            "support_plane_",
             "inner_wall_",
+            "top_edge_",
+            "box_coordinate_",
             "optimizer_",
             "output_base_",
         )
@@ -165,19 +167,44 @@ class DetectServerNode(Node):
         point_cloud = None
         processing = None
         estimate = None
+        timings: dict[str, float] = {}
+        request_start = time.perf_counter()
         try:
+            stage_start = time.perf_counter()
             frame = self._camera.capture_aligned()
+            timings["capture"] = (time.perf_counter() - stage_start) * 1000.0
+
+            stage_start = time.perf_counter()
             detection = self._detector.detect_one(frame.color_bgr)
+            timings["yolo"] = (time.perf_counter() - stage_start) * 1000.0
+            if self._detector.last_inference_device is not None:
+                self.get_logger().info(
+                    "YOLO actual inference device: "
+                    f"{self._detector.last_inference_device}"
+                )
             if detection is None:
                 response.message = "RGB-D capture succeeded, but YOLO found no crate"
                 return response
+
+            stage_start = time.perf_counter()
             point_cloud = self._estimator.extract_point_cloud(frame, detection)
+            timings["pointcloud_extract"] = (
+                time.perf_counter() - stage_start
+            ) * 1000.0
+
+            stage_start = time.perf_counter()
             processing = self._estimator.process_point_cloud(point_cloud)
+            timings["pointcloud_process"] = (
+                time.perf_counter() - stage_start
+            ) * 1000.0
+
+            stage_start = time.perf_counter()
             estimate = self._estimator.estimate_from_processing(
                 frame,
                 detection,
                 processing,
             )
+            timings["optimizer"] = (time.perf_counter() - stage_start) * 1000.0
             response.success = True
             response.box_pose = self._pose_from_center(estimate.center_base_m)
             response.message = (
@@ -192,7 +219,7 @@ class DetectServerNode(Node):
                 f"confidence={estimate.confidence:.3f}, "
                 f"surface_rmse_m={estimate.surface_rmse_m:.4f}, "
                 f"surface_inlier_ratio={estimate.surface_inlier_ratio:.3f}, "
-                f"support_plane={'valid' if estimate.support_plane_valid else 'not found'}, "
+                "support_plane=disabled, "
                 f"inner_wall={'valid' if estimate.inner_wall_valid else 'not found'}"
             )
             self.get_logger().info(
@@ -200,6 +227,12 @@ class DetectServerNode(Node):
                 f"x={estimate.center_camera_m[0]:.4f} m, "
                 f"y={estimate.center_camera_m[1]:.4f} m, "
                 f"z={estimate.center_camera_m[2]:.4f} m"
+            )
+            self.get_logger().info(
+                "Box center in base_link frame: "
+                f"x={estimate.center_base_m[0]:.4f} m, "
+                f"y={estimate.center_base_m[1]:.4f} m, "
+                f"z={estimate.center_base_m[2]:.4f} m"
             )
             return response
         except (
@@ -213,13 +246,15 @@ class DetectServerNode(Node):
             self.get_logger().error(response.message)
             return response
         finally:
+            timings["pipeline"] = (time.perf_counter() - request_start) * 1000.0
+            debug_start = time.perf_counter()
             if frame is not None:
                 try:
                     snapshot_dir = self._debug_snapshot_writer.save(
                         frame,
                         detection,
-                        point_cloud,
                         processing,
+                        estimate.center_camera_m if estimate is not None else None,
                     )
                     if snapshot_dir is not None:
                         self.get_logger().info(
@@ -229,6 +264,14 @@ class DetectServerNode(Node):
                     self.get_logger().warning(
                         f"Failed to save debug snapshot; detection result is preserved: {error}"
                     )
+            timings["debug_snapshot"] = (
+                time.perf_counter() - debug_start
+            ) * 1000.0
+            timings["total"] = (time.perf_counter() - request_start) * 1000.0
+            timing_text = ", ".join(
+                f"{name}={duration:.1f} ms" for name, duration in timings.items()
+            )
+            self.get_logger().info(f"Detection timing: {timing_text}")
             self._request_lock.release()
 
     @staticmethod

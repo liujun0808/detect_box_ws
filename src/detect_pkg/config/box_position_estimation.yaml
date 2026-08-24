@@ -62,11 +62,14 @@ detect_server_node:
     box_size_x_m: 0.295
     box_size_y_m: 0.395
     box_size_z_m: 0.225
+    # 箱体自身坐标约定：Z+ 指向开口；保持与原箱体模型方向一致。
+    # 该参数只定义坐标方向，不用于修正中心位置。
+    box_coordinate_z_sign: 1.0
 
     # -------------------- 深度与点云 --------------------
     # 深度有效范围，单位 m；深度空洞不在这里补齐。
     # 点云太少时先检查范围是否把箱体误删，再降低 depth_min/depth_max 限制。
-    depth_min_m: 0.30
+    depth_min_m: 0.20
     depth_max_m: 3.00
     # YOLO 框向四周扩张的像素数；箱体边缘缺点时增大，背景过多时减小。
     depth_bbox_margin_px: 4
@@ -97,40 +100,47 @@ detect_server_node:
     # 优先从候选簇中较远的一侧搜索内壁；0.55 表示搜索最远侧约 45% 点。
     inner_wall_far_quantile: 0.55
     # 实测法向只用于验证箱体姿态偏差；优化中心时仍使用固定外参推导的名义轴向。
-    # 内壁点云竖直跨度至少达到箱体高度的该比例时，才启用上边界候选。
-    inner_wall_min_vertical_span_ratio: 0.35
-    # 从内壁点云竖直坐标的高分位估计可见上边界，避免使用单个噪声点。
-    inner_wall_top_quantile: 0.98
-
-    # -------------------- 传送带支撑平面 --------------------
-    # RANSAC 点到平面的最大距离，单位 m；D435 深度噪声大时可小幅增大。
-    support_plane_distance_threshold_m: 0.012
-    # RANSAC 迭代次数；平面点比例较低时增大，但会增加耗时。
-    support_plane_ransac_iterations: 300
-    # 平面内点占 ROI 点云的最小比例；bbox 经常不含传送带时不要设置过高。
-    support_plane_min_inlier_ratio: 0.10
-    # 平面法向量与 base_link 期望竖直方向的最大夹角，单位 deg。
-    support_plane_max_normal_angle_deg: 12.0
+    # 以下参数用于从候选点云中拟合三维上边沿线，不使用单个高分位点作为边界。
+    # 点到候选边沿直线的最大距离，单位 m；深度噪声较大时可增大到 0.015。
+    top_edge_distance_threshold_m: 0.012
+    # 上边沿线 RANSAC 迭代次数；候选点杂乱时可增大，但会增加耗时。
+    top_edge_ransac_iterations: 300
+    # 仅用于缩小上部候选区域，最终边沿高度由三维直线内点拟合得到。
+    # 值越低候选点越多，值越高对非上边沿结构的抑制越强。
+    top_edge_candidate_quantile: 0.70
+    # 拟合直线沿对应箱体局部 X/Y 轴的最小跨度比例，防止短线或孤立点被接受。
+    top_edge_min_span_ratio: 0.35
+    # 候选直线与箱体局部 X/Y 水平轴的最大夹角，单位 deg。
+    top_edge_max_direction_angle_deg: 12.0
 
     # -------------------- 3DoF 位置优化 --------------------
-    # 下面四项是相对权重，不是物理单位；优先保持 containment/support 较强。
-    optimizer_surface_weight: 1.0
-    optimizer_containment_weight: 2.0
-    optimizer_support_weight: 4.0
+    # 观测点到完整固定尺寸箱体模型的匹配权重，不是物理单位。
+    optimizer_model_weight: 1.0
+    # 箱体内壁和加强筋属于完整模型内部的有效观测；该容差内不强制贴合外表面，单位 m。
+    optimizer_model_surface_tolerance_m: 0.03
     optimizer_bbox_weight: 0.25
     # bbox 边距离图像边界小于该像素范围时，逐渐降低完整边界匹配权重。
     # 触碰边界的边仍要求模型覆盖可见 bbox，但允许模型继续延伸到画面外。
     optimizer_bbox_clip_transition_px: 30.0
     # 远侧内壁平面残差的相对权重；拟合到可靠内壁后用于约束箱体中心。
     optimizer_inner_wall_weight: 2.0
-    # 远侧内壁上边界残差的相对权重；仅在竖直跨度足够时启用。
-    optimizer_inner_wall_top_weight: 1.0
+    # 上边沿残差的相对权重；最终中心会由上边沿和固定高度直接锚定。
+    optimizer_top_edge_weight: 1.0
+    # 允许模型上边沿略高于观测线的容差，单位 m；超过后只向下修正模型。
+    # 设为 0 可严格贴合拟合边沿；深度抖动明显时可放宽到 0.002~0.005。
+    optimizer_top_edge_tolerance_m: 0.0
     # 所有优化残差统一使用同一种鲁棒损失；可选 soft_l1 或 huber。
     optimizer_loss: soft_l1
     # 鲁棒尺度，单位 m；越小越早降低大残差/异常点的影响。
     optimizer_robust_loss_scale_m: 0.020
     # 非线性优化最大函数评估次数。
     optimizer_max_iterations: 200
+    # 优化阶段使用的代表性点数量；完整候选点云仍用于最终质量评估和保存。
+    # 数值越小越快，但过小可能降低局部几何拟合稳定性；建议先在 2000~6000 间调整。
+    optimizer_representative_point_count: 4000
+    # 优化初始中心候选数量；优先保留中位数、远侧内壁和上边沿约束生成的初值。
+    # 数值越小越快，默认 4 组已经覆盖主要几何初值。
+    optimizer_initial_seed_count: 4
     # 表面残差超过该值则拒绝结果，单位 m。
     optimizer_max_surface_rmse_m: 0.035
     # 通过固定尺寸模型质量检查的点比例下限。

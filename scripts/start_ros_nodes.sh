@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-WORKSPACE_DIR="/home/user/detect_box_ws"
+WORKSPACE_DIR="/home/ub/project/detect_box_ws"
 ROS_SETUP="/opt/ros/humble/setup.bash"
 WS_SETUP="${WORKSPACE_DIR}/install/setup.bash"
-export ROS_DOMAIN_ID=22
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-22}"
 export ROS_LOCALHOST_ONLY=0
-export CYCLONEDDS_URI=/home/user/dds/cyclonedds.xml
 
 if [[ ! -f "${ROS_SETUP}" ]]; then
   echo "ROS setup file not found: ${ROS_SETUP}" >&2
