@@ -87,6 +87,12 @@ Python 主实现位于 detect_box_pipeline 目录。scripts/detect_server_node �
 
 ## 3. 主要依赖
 
+本节分为两部分：
+
+- 3.1、3.2 是普通 Ubuntu/PC 平台的通用依赖说明，也适用于已经具备对应软件环境的 Jetson；
+- Jetson Orin NX 不要直接照搬 3.2 中的通用 `torch` 和 `pyrealsense2` 安装命令，应按照 3.3 的 Jetson 专用流程安装；
+- 你当前的 Orin NX 已经安装 ROS 2 Humble，因此不需要重复安装 ROS 2，只需要执行 3.3.1 中的环境确认和系统依赖安装。
+
 ### 3.1 系统依赖
 
 - Ubuntu；
@@ -95,9 +101,9 @@ Python 主实现位于 detect_box_pipeline 目录。scripts/detect_server_node �
 - librealsense2 和 RealSense D435；
 - colcon、ament_cmake_python。
 
-### 3.2 Python 依赖
+### 3.2 普通 Ubuntu/PC 平台的 Python 依赖
 
-当前 Python 主程序建议在 py310 conda 环境中运行，主要依赖：
+这一小节主要面向普通 Ubuntu/PC 平台，或者已经确认存在对应 Python wheel 的平台。当前 Python 主程序建议在 py310 conda 环境中运行，主要依赖：
 
 ~~~text
 Python 3.10
@@ -128,7 +134,258 @@ conda activate py310
 pip install numpy scipy opencv-python pyrealsense2 ultralytics
 ~~~
 
-PyTorch 建议按照当前显卡驱动和 CUDA 版本选择对应安装命令，不要直接使用不匹配的 CPU 版本。
+普通 Ubuntu/PC 平台可以根据显卡和 CUDA 版本安装 PyTorch。Jetson Orin NX 不要执行这里的通用 `pip install torch` 或直接使用 PC 的 PyTorch wheel，必须执行 3.3.3 中与 JetPack 匹配的 NVIDIA Jetson PyTorch 安装流程。
+
+### 3.3 Jetson Orin NX 平台部署
+
+以下流程针对已经安装 JetPack 和 ROS 2 Humble 的 Jetson Orin NX。Jetson NX 不能直接套用普通 x86 Ubuntu 主机的 PyTorch 安装命令，请先确认硬件、JetPack 和 ROS 2 环境：
+
+~~~bash
+uname -m
+cat /etc/nv_tegra_release
+cat /etc/os-release
+python3 --version
+ls /opt/ros
+~~~
+
+正常应看到：
+
+- 架构为 `aarch64`；
+- 硬件为 `Jetson Orin NX`；
+- `/opt/ros` 中包含 `humble`。
+
+当前目标环境：
+
+| 硬件 | 推荐系统 | ROS 2 建议 | 说明 |
+|---|---|---|---|
+| Orin NX | JetPack 6.x / Ubuntu 22.04 | ROS 2 Humble | 与 Humble 的 Ubuntu 22.04 arm64 支持最匹配 |
+
+JetPack 会同时影响 Jetson Linux、CUDA、TensorRT 和 PyTorch 的可用版本。安装或升级 JetPack 后，应重新确认 Python 深度学习环境，不要沿用另一台机器的 `torch` 安装包。可参考 NVIDIA 的 [JetPack 6.1](https://developer.nvidia.com/embedded/jetpack-sdk-61)、[Jetson PyTorch 安装说明](https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html) 和 [ROS 2 Humble 平台支持列表](https://docs.ros.org/en/humble/Releases/Release-Humble-Hawksbill.html)。
+
+#### 3.3.1 安装 Jetson 系统依赖
+
+你已经安装 ROS 2 Humble，因此不需要再次执行 `sudo apt install ros-humble-desktop`。先确认 ROS 2 环境：
+
+~~~bash
+source /opt/ros/humble/setup.bash
+ros2 --version
+ls /opt/ros
+~~~
+
+然后安装本包所需、但不属于 ROS 2 的系统依赖：
+
+~~~bash
+sudo apt update
+sudo apt install -y \
+  build-essential cmake git pkg-config \
+  python3-dev python3-pip python3-venv \
+  python3-colcon-common-extensions python3-rosdep python3-vcstool \
+  libopenblas-dev libusb-1.0-0-dev libudev-dev libssl-dev udev
+~~~
+
+确认 `ros2 --version` 可执行，且 `/opt/ros` 中存在 `humble`。`upper_limb_interface` 也必须已经安装，或位于当前工作空间的 `src` 目录中。
+
+如果系统尚未初始化 rosdep，再执行以下命令；已经初始化过则跳过 `rosdep init`：
+
+~~~bash
+sudo rosdep init
+rosdep update
+~~~
+
+#### 3.3.2 创建 NX 上的 py310 环境
+
+建议在 NX 上使用支持 `aarch64` 的 Miniforge/Miniconda，然后创建与当前代码一致的 Python 3.10 环境：
+
+~~~bash
+conda create -n py310 python=3.10 -y
+conda activate py310
+python -m pip install --upgrade pip
+~~~
+
+确认 Python 架构和版本：
+
+~~~bash
+python -c "import platform, sys; print(platform.machine()); print(sys.executable); print(sys.version)"
+~~~
+
+输出的架构应为 `aarch64`，解释器应位于 NX 上实际存在的 `py310` 环境中。
+
+#### 3.3.3 安装 Jetson CUDA 版 PyTorch
+
+Jetson 上必须安装 NVIDIA 针对 JetPack 发布的 `aarch64` PyTorch wheel，并且 wheel 版本要和当前 JetPack 匹配。不要执行没有版本约束的：
+
+~~~bash
+pip install torch
+~~~
+
+该命令可能安装不适用于 Jetson 的通用包，或者覆盖已经正确安装的 NVIDIA 版本。请按照 NVIDIA 的 [Jetson PyTorch 安装说明](https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html)选择与 JetPack 对应的安装包，然后在 `py310` 环境中执行 NVIDIA 给出的安装命令。例如，官方文档通常要求先设置对应的 wheel 地址，再安装：
+
+~~~bash
+conda activate py310
+# 按 NVIDIA 文档中与当前 JetPack 匹配的版本填写 TORCH_INSTALL
+export TORCH_INSTALL=/absolute/path/or/url/to/jetson_pytorch_wheel.whl
+python -m pip install --no-cache-dir "${TORCH_INSTALL}"
+~~~
+
+安装后验证 CUDA：
+
+~~~bash
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("device:", torch.cuda.get_device_name(0))
+PY
+~~~
+
+如果 `cuda available` 为 `False`，先不要启动 ROS 节点，优先检查 JetPack、wheel、驱动和环境是否匹配。
+
+#### 3.3.4 安装 Ultralytics 和 RealSense Python 接口
+
+在已经安装好 Jetson PyTorch 的同一个环境中安装其余 Python 包：
+
+~~~bash
+conda activate py310
+python -m pip install numpy scipy opencv-python ultralytics
+python -m pip install pyrealsense2
+~~~
+
+验证：
+
+~~~bash
+python -c "import cv2, numpy, scipy, torch, ultralytics; print('python packages ok')"
+python -c "import pyrealsense2 as rs; print('pyrealsense2 ok:', rs.__file__)"
+~~~
+
+如果 `pyrealsense2` 没有适用于当前 Jetson Python/架构的 pip wheel，需要从 librealsense 源码编译 Python binding。官方 Python binding 和 Jetson 安装说明分别见 [RealSense Python wrapper](https://github.com/IntelRealSense/librealsense/blob/master/wrappers/python/readme.md) 和 [RealSense Jetson installation](https://github.com/IntelRealSense/librealsense/blob/master/doc/installation_jetson.md)。基本流程如下：
+
+~~~bash
+sudo apt update
+sudo apt install -y libusb-1.0-0-dev libudev-dev pkg-config \
+  libssl-dev libgtk-3-dev libglfw3-dev libglu1-mesa-dev
+
+git clone https://github.com/realsenseai/librealsense.git
+cd librealsense
+./scripts/setup_udev_rules.sh
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_EXAMPLES=false \
+  -DBUILD_GRAPHICAL_EXAMPLES=false \
+  -DBUILD_PYTHON_BINDINGS=true \
+  -DPYTHON_EXECUTABLE="$(which python)"
+make -j"$(nproc)"
+sudo make install
+sudo ldconfig
+export PYTHONPATH="/usr/local/lib:${PYTHONPATH:-}"
+python -c "import pyrealsense2 as rs; print('pyrealsense2 ok:', rs.__file__)"
+~~~
+
+RealSense SDK 直接由本包通过 `pyrealsense2` 获取 D435 图像，不需要启动 `realsense2_camera` ROS 话题节点。D435 应连接到 NX 的 USB 3.x 接口；如果出现设备可枚举但没有帧，先检查 USB 线缆、供电、udev 规则和 librealsense 的 Jetson backend 配置。
+
+#### 3.3.5 准备权重和工作空间
+
+将 `yolov8s-worldv2.pt` 放入工作空间的 `models` 目录：
+
+~~~bash
+mkdir -p /home/ub/project/detect_box_ws/models
+cp /absolute/path/to/yolov8s-worldv2.pt \
+  /home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
+ls -lh /home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
+~~~
+
+如果 NX 上的用户名或工作空间路径不是 `/home/ub/project/detect_box_ws`，需要同时修改 YAML 中的绝对路径、launch 使用的参数路径以及自启脚本中的工作空间路径。
+
+#### 3.3.6 在 NX 上编译
+
+~~~bash
+cd /home/ub/project/detect_box_ws
+source /opt/ros/humble/setup.bash
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --packages-select upper_limb_interface detect_pkg --symlink-install
+source install/setup.bash
+~~~
+
+如果 `upper_limb_interface` 已经安装，不需要在当前工作空间重复构建：
+
+~~~bash
+colcon build --packages-select detect_pkg --symlink-install
+source install/setup.bash
+~~~
+
+#### 3.3.7 使用 NX 上的正确 Python 启动
+
+当前 `scripts/detect_server_node` 默认尝试使用：
+
+~~~text
+/home/ub/miniconda3/envs/py310/bin/python
+~~~
+
+NX 上如果 Miniforge/Miniconda 安装路径不同，启动前必须将 `DETECT_BOX_PYTHON` 指向实际解释器：
+
+~~~bash
+conda activate py310
+export DETECT_BOX_PYTHON="$(which python)"
+cd /home/ub/project/detect_box_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch detect_pkg box_position_estimation.launch.py
+~~~
+
+也可以直接写绝对路径：
+
+~~~bash
+export DETECT_BOX_PYTHON=/home/<nx-user>/miniforge3/envs/py310/bin/python
+~~~
+
+配置 systemd 自启时，不能依赖交互式 `conda activate`。请在 `scripts/start_ros_nodes.sh` 中、执行 `ros2 launch` 之前加入实际的 `DETECT_BOX_PYTHON` 设置，然后重新安装自启服务：
+
+~~~bash
+cd /home/ub/project/detect_box_ws
+sed -n '1,120p' scripts/start_ros_nodes.sh
+# 编辑脚本，加入：
+# export DETECT_BOX_PYTHON=/home/<nx-user>/miniforge3/envs/py310/bin/python
+./scripts/install_autostart.sh
+sudo systemctl restart detect_box_ws.service
+~~~
+
+启动后应在第一次推理日志中看到：
+
+~~~text
+YOLO actual inference device: cuda:0
+~~~
+
+若显示 `cpu`，先回到 3.3.3 检查 PyTorch，不要通过修改 YAML 把 CPU 误认为 CUDA 已启用。
+
+#### 3.3.8 NX 启动和检测
+
+前台启动：
+
+~~~bash
+cd /home/ub/project/detect_box_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export DETECT_BOX_PYTHON=/home/<nx-user>/miniforge3/envs/py310/bin/python
+ros2 launch detect_pkg box_position_estimation.launch.py
+~~~
+
+另开终端调用服务：
+
+~~~bash
+cd /home/ub/project/detect_box_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 service call /detect upper_limb_interface/srv/DetectAprilTag \
+  "{capture_once: true}"
+~~~
+
+首次请求可能包含相机启动、首帧等待和 CUDA/模型初始化，因此耗时明显较长；相机保持运行后，后续请求通常会明显变快。NX 如果需要观察温度和负载，可使用：
+
+~~~bash
+tegrastats
+~~~
+
+`nvpmodel` 和 `jetson_clocks` 会改变功耗、频率和温度，只有确认散热和供电满足要求后才按具体 NX 载板说明使用，不要盲目固定为某个模式。
 
 ## 4. YOLO 权重
 
@@ -284,10 +541,9 @@ ros2 service type /detect
 
 ## 9. 运行日志
 
-启动时会打印 YOLO 设备选择结果。第一次成功推理后会打印实际推理设备，例如：
+节点第一次成功推理后会打印实际推理设备，例如：
 
 ~~~text
-YOLO device selected: cuda:0
 YOLO actual inference device: cuda:0
 ~~~
 
@@ -356,20 +612,20 @@ ls -lh /home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
 
 ### YOLO 没有使用 CUDA
 
-查看节点日志中的：
+查看节点日志中的实际推理设备：
 
 ~~~text
-YOLO device selected
 YOLO actual inference device
 ~~~
 
-如果显示 cpu，需要检查 py310 环境中的 PyTorch 是否为 CUDA 版本，以及显卡驱动是否正常：
+如果显示 `cpu`，需要检查 py310 环境中的 PyTorch 是否为 CUDA 版本，以及显卡驱动是否正常：
 
 ~~~bash
 conda activate py310
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
-nvidia-smi
 ~~~
+
+普通 NVIDIA 主机可使用 `nvidia-smi`；Jetson NX 应优先使用 `tegrastats`，因为 Jetson 通常不提供桌面 NVIDIA 驱动中的 `nvidia-smi` 命令。
 
 ### RealSense 没有帧
 
