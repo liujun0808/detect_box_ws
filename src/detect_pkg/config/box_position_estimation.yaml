@@ -42,7 +42,7 @@ detect_server_node:
     yolo_startup_warmup: true
     yolo_image_size: 640
     # 置信度过低会引入误检，过高会漏检；先从 0.25 附近调试。
-    yolo_confidence_threshold: 0.25
+    yolo_confidence_threshold: 0.1
     # NMS 重叠阈值；多框重叠严重时再调整。
     yolo_iou_threshold: 0.45
     yolo_agnostic_nms: true

@@ -7,6 +7,8 @@ WS_SETUP="${WORKSPACE_DIR}/install/setup.bash"
 export DETECT_BOX_PYTHON="${DETECT_BOX_PYTHON:-/home/user/miniconda3/envs/py310/bin/python}"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-22}"
 export ROS_LOCALHOST_ONLY=0
+export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+export CYCLONEDDS_URI="${CYCLONEDDS_URI:-file:///home/user/dds/cyclonedds.xml}"
 
 if [[ ! -f "${ROS_SETUP}" ]]; then
   echo "ROS setup file not found: ${ROS_SETUP}" >&2

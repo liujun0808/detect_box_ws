@@ -168,9 +168,17 @@ class DetectServerNode(Node):
         response.box_pose = self._fallback_pose
         if not request.capture_once:
             response.message = "capture_once=false, detection was not triggered"
+            self.get_logger().info(
+                f"Detection response: success={response.success}, "
+                f"message: {response.message}"
+            )
             return response
         if not self._request_lock.acquire(blocking=False):
             response.message = "A detection request is already running"
+            self.get_logger().warning(
+                f"Detection response: success={response.success}, "
+                f"message: {response.message}"
+            )
             return response
         frame = None
         detection = None
@@ -282,6 +290,10 @@ class DetectServerNode(Node):
                 f"{name}={duration:.1f} ms" for name, duration in timings.items()
             )
             self.get_logger().info(f"Detection timing: {timing_text}")
+            self.get_logger().info(
+                f"Detection response: success={response.success}, "
+                f"message: {response.message}"
+            )
             self._request_lock.release()
 
     @staticmethod
