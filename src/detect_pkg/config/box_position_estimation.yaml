@@ -35,9 +35,11 @@ detect_server_node:
 
     # -------------------- YOLO-World --------------------
     # 权重文件必须位于该路径；当前默认运行在 py310 环境。
-    yolo_model_path: /home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
+    yolo_model_path: /home/user/project/detect_box_pointcloud/detect_box_ws/models/yolov8s-worldv2.pt
     # auto、cpu 或 cuda:0；现场 CPU 推理较慢时优先确认 CUDA 环境。
     yolo_device: auto
+    # 节点启动时加载 YOLO-World/CLIP 并执行一次预热推理，避免首次服务请求承担初始化耗时。
+    yolo_startup_warmup: true
     yolo_image_size: 640
     # 置信度过低会引入误检，过高会漏检；先从 0.25 附近调试。
     yolo_confidence_threshold: 0.25
@@ -167,6 +169,6 @@ detect_server_node:
     # 每次 /detect 请求保存一次调试快照；关闭后不写入图像和点云文件。
     debug_enabled: true
     # 快照根目录；每次请求会在这里创建一个时间命名的子目录。
-    debug_output_dir: /home/ub/project/detect_box_ws/debug_box_position
+    debug_output_dir: /home/user/project/detect_box_pointcloud/detect_box_ws/debug_box_position
     # 只保留最近 N 次请求，按目录修改时间删除更早的快照；当前需求为 10 次。
     debug_max_snapshots: 10

@@ -85,6 +85,30 @@ class YoloWorldDetector:
         """Return the tensor device observed on the last completed inference."""
         return self._last_inference_device
 
+    def initialize(self, warmup: bool = True) -> None:
+        """Load YOLO-World and CLIP, optionally running one warmup inference."""
+        model = self._load_model()
+        if not warmup:
+            return
+
+        warmup_image = np.zeros(
+            (self._image_size, self._image_size, 3),
+            dtype=np.uint8,
+        )
+        try:
+            model.predict(
+                source=warmup_image,
+                imgsz=self._image_size,
+                device=self._device,
+                max_det=self._max_detections,
+                agnostic_nms=self._agnostic_nms,
+                verbose=False,
+            )
+        except Exception as error:
+            raise YoloWorldDetectorError(
+                f"YOLO startup warmup failed: {error}"
+            ) from error
+
     def detect_one(self, color_bgr: Any) -> BoxDetection | None:
         image = self._validate_image(color_bgr)
         model = self._load_model()

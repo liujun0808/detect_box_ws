@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-WORKSPACE_DIR="/home/ub/project/detect_box_ws"
+WORKSPACE_DIR="/home/user/project/detect_box_pointcloud/detect_box_ws"
 ROS_SETUP="/opt/ros/humble/setup.bash"
 WS_SETUP="${WORKSPACE_DIR}/install/setup.bash"
+export DETECT_BOX_PYTHON="${DETECT_BOX_PYTHON:-/home/user/miniconda3/envs/py310/bin/python}"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-22}"
 export ROS_LOCALHOST_ONLY=0
 

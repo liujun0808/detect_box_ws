@@ -36,6 +36,10 @@ class DebugSnapshotWriter:
         snapshot_dir.mkdir()
 
         color = np.asarray(frame.color_bgr)
+        # Always save the raw RGB image, including when YOLO returns no
+        # detection. This makes failed requests inspectable instead of
+        # leaving an empty snapshot directory.
+        self._write_image(snapshot_dir / "color_raw.png", color)
         if detection is not None:
             annotated = color.copy()
             self._draw_detection(annotated, detection)

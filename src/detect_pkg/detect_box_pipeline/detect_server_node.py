@@ -63,6 +63,15 @@ class DetectServerNode(Node):
             class_prompts,
             self._yolo_parameters(),
         )
+        self.get_logger().info("Loading YOLO-World and CLIP model at startup...")
+        try:
+            self._detector.initialize(
+                warmup=bool(self._parameter("yolo_startup_warmup", True))
+            )
+        except YoloWorldDetectorError as error:
+            self.get_logger().error(f"Startup model initialization failed: {error}")
+            raise
+        self.get_logger().info("YOLO-World startup initialization complete")
         self._estimator = BoxPositionEstimator(
             box_size,
             camera_to_base,
@@ -132,6 +141,7 @@ class DetectServerNode(Node):
             "yolo_max_detections": 10,
             "yolo_min_bbox_width_px": 20,
             "yolo_min_bbox_height_px": 20,
+            "yolo_startup_warmup": True,
         }
         return {
             name: self._parameter(name, default)

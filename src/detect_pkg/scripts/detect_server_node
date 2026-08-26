@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-DETECT_BOX_PYTHON="${DETECT_BOX_PYTHON:-/home/ub/miniconda3/envs/py310/bin/python}"
+DETECT_BOX_PYTHON="${DETECT_BOX_PYTHON:-/home/user/miniconda3/envs/py310/bin/python}"
 
 if [[ ! -x "${DETECT_BOX_PYTHON}" ]]; then
   echo "Python executable not found: ${DETECT_BOX_PYTHON}" >&2
