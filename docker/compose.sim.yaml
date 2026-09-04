@@ -1,0 +1,20 @@
+name: detect-box-sim
+
+services:
+  detector:
+    image: ${DETECT_BOX_SIM_IMAGE:-detect-box-sim:local}
+    # Write bind-mounted debug snapshots with the invoking host user's ownership.
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    network_mode: host
+    # Keep host IPC available for ROS 2 tools that use shared memory.
+    ipc: host
+    gpus: all
+    environment:
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      ROS_LOCALHOST_ONLY: "${ROS_LOCALHOST_ONLY:-0}"
+      RMW_IMPLEMENTATION: "${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+      # Docker-bound Fast DDS must use UDP instead of same-host SHM transport.
+      FASTDDS_BUILTIN_TRANSPORTS: "${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}"
+    volumes:
+      - ./debug_box_position_sim:/opt/detect_box_ws/debug_box_position_sim
+    restart: unless-stopped

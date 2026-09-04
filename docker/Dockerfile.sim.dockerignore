@@ -1,0 +1,16 @@
+**
+!docker/
+!docker/entrypoint.sim.sh
+!docker/requirements-sim.txt
+!src/
+!src/upper_limb_interface/
+!src/upper_limb_interface/**
+!src/detect_pkg_sim/
+!src/detect_pkg_sim/**
+!models/
+!models/yolov8s-worldv2.pt
+!weights/
+!weights/clip/
+!weights/clip/ViT-B-32.pt
+**/__pycache__/
+**/*.pyc

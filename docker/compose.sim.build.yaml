@@ -1,0 +1,12 @@
+services:
+  detector:
+    build:
+      # sim_compose.sh passes the workspace as Compose's project directory.
+      context: .
+      dockerfile: docker/Dockerfile.sim
+      entitlements:
+        - network.host
+      args:
+        HTTP_PROXY: ${DETECT_BOX_BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${DETECT_BOX_BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${DETECT_BOX_BUILD_NO_PROXY:-}

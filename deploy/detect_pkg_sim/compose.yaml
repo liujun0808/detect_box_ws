@@ -1,0 +1,26 @@
+name: detect-pkg-sim
+
+services:
+  detector:
+    image: ${DETECT_BOX_SIM_IMAGE}
+    # Keep bind-mounted debug snapshots owned by the user who starts the service.
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    network_mode: host
+    ipc: host
+    gpus: all
+    environment:
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      ROS_LOCALHOST_ONLY: "${ROS_LOCALHOST_ONLY:-0}"
+      RMW_IMPLEMENTATION: "${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+      # Avoid Fast DDS shared-memory transport across the Docker boundary.
+      FASTDDS_BUILTIN_TRANSPORTS: "${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}"
+    volumes:
+      - ./config/box_position_estimation_sim.yaml:/opt/detect_box_ws/runtime_config/box_position_estimation_sim.yaml:ro
+      - ./debug_box_position_sim:/opt/detect_box_ws/debug_box_position_sim
+    command:
+      - ros2
+      - launch
+      - detect_pkg_sim
+      - box_position_estimation_sim.launch.py
+      - params_file:=/opt/detect_box_ws/runtime_config/box_position_estimation_sim.yaml
+    restart: unless-stopped

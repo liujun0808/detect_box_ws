@@ -3,7 +3,12 @@
 /log
 /debug_img
 /debug_box_position
-/models/*.pt
-!/models/.gitkeep
+/debug_box_position_sim
+/docker/.env
+/models
 /weights
 /参考ply
+/models
+/src/d435_publisher
+/src/detect_pkg
+

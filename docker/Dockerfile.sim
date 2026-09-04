@@ -1,0 +1,85 @@
+FROM ros:humble-ros-base-jammy
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG TORCH_VERSION=2.6.0
+ARG TORCHVISION_VERSION=0.21.0
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DETECT_BOX_PYTHON=/usr/bin/python3 \
+    ROS_LOG_DIR=/tmp/ros_log \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    YOLO_CONFIG_DIR=/tmp/Ultralytics
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      git \
+      libgl1 \
+      libglib2.0-0 \
+      libgomp1 \
+      python3-dev \
+      python3-pip \
+      python3-colcon-common-extensions \
+      ros-humble-ament-cmake-python \
+      ros-humble-cv-bridge \
+      ros-humble-message-filters \
+      ros-humble-rmw-cyclonedds-cpp \
+      ros-humble-rosidl-default-generators \
+      ros-humble-sensor-msgs \
+      ros-humble-tf2-ros \
+      ros-humble-visualization-msgs \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY docker/requirements-sim.txt /tmp/requirements-sim.txt
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+
+# Only the Python dependency downloads need the local build proxy.
+RUN --network=host export http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" no_proxy="${NO_PROXY}"; \
+    python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && python3 -m pip install --no-cache-dir \
+      --index-url "${PYTORCH_INDEX_URL}" \
+      "torch==${TORCH_VERSION}" \
+      "torchvision==${TORCHVISION_VERSION}" \
+    && python3 -m pip install --no-cache-dir -r /tmp/requirements-sim.txt \
+    && rm -f /tmp/requirements-sim.txt
+
+WORKDIR /opt/detect_box_ws
+
+COPY src/upper_limb_interface src/upper_limb_interface
+COPY src/detect_pkg_sim src/detect_pkg_sim
+COPY models/yolov8s-worldv2.pt models/yolov8s-worldv2.pt
+COPY weights/clip/ViT-B-32.pt weights/clip/ViT-B-32.pt
+
+RUN printf '%s  %s\n' \
+      '9b2c17ab6124a913e9b3a5c170617920d91b0f01111a8479da69f00e2cf27792' \
+      'models/yolov8s-worldv2.pt' \
+      | sha256sum --check --strict - \
+    && printf '%s  %s\n' \
+      '40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af' \
+      'weights/clip/ViT-B-32.pt' \
+      | sha256sum --check --strict - \
+    && source /opt/ros/humble/setup.bash \
+    && colcon build \
+      --merge-install \
+      --packages-select upper_limb_interface detect_pkg_sim \
+      --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+    && rm -rf build log src
+
+COPY docker/entrypoint.sim.sh /usr/local/bin/detect-box-sim-entrypoint
+RUN chmod 0755 /usr/local/bin/detect-box-sim-entrypoint \
+    && mkdir -p \
+      /opt/detect_box_ws/debug_box_position_sim \
+      /tmp/ros_log \
+      /tmp/matplotlib \
+      /tmp/Ultralytics
+
+ENTRYPOINT ["/usr/local/bin/detect-box-sim-entrypoint"]
+CMD ["ros2", "launch", "detect_pkg_sim", "box_position_estimation_sim.launch.py"]

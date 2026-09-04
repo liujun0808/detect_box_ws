@@ -1,0 +1,165 @@
+# 仿真箱体检测与位置估计参数。
+# 使用 launch 启动时默认加载本文件；也可以通过 params_file 指定另一份 YAML。
+detect_server_node:
+  ros__parameters:
+    # -------------------- ROS 接口 --------------------
+    # 服务接口保持原有 /detect，不要随意修改。
+    service_name: /detect
+    # 当前保留原有 box_pose 话题配置；位置结果主要通过 /detect 服务返回。
+    box_pose_topic: box_pose
+    box_pose_frame_id: base_link
+
+    # -------------------- 仿真 RGB-D 话题 --------------------
+    # 三个话题应使用同一仿真相机，并带有可同步的 header.stamp。
+    color_topic: /camera/color/image_raw
+    camera_info_topic: /camera/color/camera_info
+    aligned_depth_topic: /camera/aligned_depth_to_color/image_raw
+    # 固定输入格式：彩色图 rgb8；对齐深度图 32FC1，深度单位为 m。
+    # 同步队列越大越能容忍消息抖动，但会占用更多内存。
+    rgbd_sync_queue_size: 20
+    # 三个消息时间戳允许的最大差值，单位 s。
+    rgbd_sync_tolerance_sec: 0.03
+    # /detect 到达后只接受新同步帧；在该时间内没有新帧则返回失败。
+    rgbd_wait_timeout_sec: 1.0
+
+    # -------------------- YOLO-World --------------------
+    # 权重文件必须位于该路径；当前默认运行在 py310 环境。
+    # 相对路径以启动节点时的工作目录为基准；Docker 中固定为 /opt/detect_box_ws。
+    yolo_model_path: models/yolov8s-worldv2.pt
+    # auto、cpu 或 cuda:0；现场 CPU 推理较慢时优先确认 CUDA 环境。
+    yolo_device: auto
+    # 节点启动时加载 YOLO-World/CLIP 并执行一次预热推理，避免首次服务请求承担初始化耗时。
+    yolo_startup_warmup: true
+    yolo_image_size: 640
+    # 置信度过低会引入误检，过高会漏检；先从 0.25 附近调试。
+    yolo_confidence_threshold: 0.1
+    # NMS 重叠阈值；多框重叠严重时再调整。
+    yolo_iou_threshold: 0.45
+    yolo_agnostic_nms: true
+    yolo_max_detections: 10
+    # 检测框太小直接拒绝，避免小噪声进入深度流程。
+    yolo_min_bbox_width_px: 20
+    yolo_min_bbox_height_px: 20
+    # 从上到下依次是 YOLO-World 的箱体提示词；漏检时可增加同义词。
+    yolo_class_prompts:
+      - green plastic crate
+      - plastic crate
+      - storage crate
+      - green storage box
+      - green box
+      - plastic container
+
+    # -------------------- 箱体先验 --------------------
+    # 箱体外部尺寸，单位 m；当前 3DoF 优化不会修改这些值。
+    box_size_x_m: 0.295
+    box_size_y_m: 0.395
+    box_size_z_m: 0.225
+    # 箱体自身坐标约定：Z+ 指向开口；保持与原箱体模型方向一致。
+    # 该参数只定义坐标方向，不用于修正中心位置。
+    box_coordinate_z_sign: 1.0
+
+    # -------------------- 深度与点云 --------------------
+    # 深度有效范围，单位 m；深度空洞不在这里补齐。
+    # 点云太少时先检查范围是否把箱体误删，再降低 depth_min/depth_max 限制。
+    depth_min_m: 0.20
+    depth_max_m: 3.00
+    # YOLO 框向四周扩张的像素数；箱体边缘缺点时增大，背景过多时减小。
+    depth_bbox_margin_px: 4
+    # 像素采样步长；减小可增加点数和精度，但会增加计算量。
+    pointcloud_pixel_stride: 2
+    # ROI 中最少有效深度点数；部分可见时可适当降低，但误检风险会上升。
+    pointcloud_min_points: 300
+    # SOR 的近邻数和标准差倍数；std_ratio 越小，离群点过滤越严格。
+    pointcloud_statistical_neighbors: 20
+    pointcloud_statistical_std_ratio: 1.5
+    # 3D 聚类邻域距离，单位 m；箱体被切成多个簇时增大，背景被合并时减小。
+    pointcloud_cluster_tolerance_m: 0.025
+    # 小于该点数的 3D 簇直接视为噪声。
+    pointcloud_min_cluster_points: 40
+
+    # -------------------- 箱体远侧内壁平面 --------------------
+    # 远侧内壁法向对应的箱体局部轴；当前箱体布置默认使用 base_link X 轴。
+    # 若现场确认可见内壁是另一组相对面，可改为 y。
+    inner_wall_axis: x
+    # 点到内壁平面的最大距离，单位 m；D435 噪声较大时可小幅增大。
+    inner_wall_distance_threshold_m: 0.015
+    # 内壁 RANSAC 迭代次数；内壁点较少或杂点较多时可增大。
+    inner_wall_ransac_iterations: 300
+    # 内壁内点占最终候选簇的最小比例；内壁只露出一部分时可降低。
+    inner_wall_min_inlier_ratio: 0.05
+    # 拟合平面法向与名义箱体轴的最大夹角，单位 deg。
+    inner_wall_max_normal_angle_deg: 15.0
+    # 优先从候选簇中较远的一侧搜索内壁；0.55 表示搜索最远侧约 45% 点。
+    inner_wall_far_quantile: 0.55
+    # 实测法向只用于验证箱体姿态偏差；优化中心时仍使用固定外参推导的名义轴向。
+    # 以下参数用于从候选点云中拟合三维上边沿线，不使用单个高分位点作为边界。
+    # 点到候选边沿直线的最大距离，单位 m；深度噪声较大时可增大到 0.015。
+    top_edge_distance_threshold_m: 0.012
+    # 上边沿线 RANSAC 迭代次数；候选点杂乱时可增大，但会增加耗时。
+    top_edge_ransac_iterations: 300
+    # 仅用于缩小上部候选区域，最终边沿高度由三维直线内点拟合得到。
+    # 值越低候选点越多，值越高对非上边沿结构的抑制越强。
+    top_edge_candidate_quantile: 0.70
+    # 拟合直线沿对应箱体局部 X/Y 轴的最小跨度比例，防止短线或孤立点被接受。
+    top_edge_min_span_ratio: 0.35
+    # 候选直线与箱体局部 X/Y 水平轴的最大夹角，单位 deg。
+    top_edge_max_direction_angle_deg: 12.0
+
+    # -------------------- 3DoF 位置优化 --------------------
+    # 观测点到完整固定尺寸箱体模型的匹配权重，不是物理单位。
+    optimizer_model_weight: 1.0
+    # 箱体内壁和加强筋属于完整模型内部的有效观测；该容差内不强制贴合外表面，单位 m。
+    optimizer_model_surface_tolerance_m: 0.03
+    optimizer_bbox_weight: 0.25
+    # bbox 边距离图像边界小于该像素范围时，逐渐降低完整边界匹配权重。
+    # 触碰边界的边仍要求模型覆盖可见 bbox，但允许模型继续延伸到画面外。
+    optimizer_bbox_clip_transition_px: 30.0
+    # 远侧内壁平面残差的相对权重；拟合到可靠内壁后用于约束箱体中心。
+    optimizer_inner_wall_weight: 2.0
+    # 上边沿残差的相对权重；最终中心会由上边沿和固定高度直接锚定。
+    optimizer_top_edge_weight: 1.0
+    # 允许模型上边沿略高于观测线的容差，单位 m；超过后只向下修正模型。
+    # 设为 0 可严格贴合拟合边沿；深度抖动明显时可放宽到 0.002~0.005。
+    optimizer_top_edge_tolerance_m: 0.0
+    # 所有优化残差统一使用同一种鲁棒损失；可选 soft_l1 或 huber。
+    optimizer_loss: soft_l1
+    # 鲁棒尺度，单位 m；越小越早降低大残差/异常点的影响。
+    optimizer_robust_loss_scale_m: 0.020
+    # 非线性优化最大函数评估次数。
+    optimizer_max_iterations: 200
+    # 优化阶段使用的代表性点数量；完整候选点云仍用于最终质量评估和保存。
+    # 数值越小越快，但过小可能降低局部几何拟合稳定性；建议先在 2000~6000 间调整。
+    optimizer_representative_point_count: 4000
+    # 优化初始中心候选数量；优先保留中位数、远侧内壁和上边沿约束生成的初值。
+    # 数值越小越快，默认 4 组已经覆盖主要几何初值。
+    optimizer_initial_seed_count: 4
+    # 表面残差超过该值则拒绝结果，单位 m。
+    optimizer_max_surface_rmse_m: 0.035
+    # 通过固定尺寸模型质量检查的点比例下限。
+    optimizer_min_surface_inlier_ratio: 0.15
+
+    # -------------------- 仿真相机到 base_link 外参 --------------------
+    # 4x4 齐次矩阵，按行展开。仿真相机采用光学坐标：X 右、Y 下、Z 前。
+    # 当前先保留实体配置值；接入仿真场景时必须核对为仿真中的 T_base_camera。
+    camera_to_base_row_major:
+      [0.0000, -0.342020, 0.939693, 0.12972,
+       -1.000000, 0.000000, 0.000000, 0.03250,
+       0.000000, -0.939693, -0.342020, 0.24561,
+       0.000000, 0.000000, 0.000000, 1.000000]
+
+    # 输出位置的 base_link 工作空间限制，超出范围直接拒绝结果，单位 m。
+    output_base_x_min_m: -2.0
+    output_base_x_max_m: 2.0
+    output_base_y_min_m: -2.0
+    output_base_y_max_m: 2.0
+    output_base_z_min_m: -0.2
+    output_base_z_max_m: 2.0
+    # 失败时返回的 Pose：[x,y,z,qx,qy,qz,qw]；服务消息结构保持不变。
+    fallback_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+    # 每次 /detect 请求保存一次调试快照；关闭后不写入图像和点云文件。
+    debug_enabled: true
+    # 快照根目录；每次请求会在这里创建一个时间命名的子目录。
+    debug_output_dir: debug_box_position_sim
+    # 只保留最近 N 次请求，按目录修改时间删除更早的快照；当前需求为 10 次。
+    debug_max_snapshots: 10
