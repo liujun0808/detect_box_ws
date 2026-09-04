@@ -146,13 +146,7 @@ cp .env.example .env
 liujun0808/detect_pkg_sim:v0.1.0
 ```
 
-仓库为私有时，先登录 Docker Hub：
-
-```bash
-docker login -u liujun0808
-```
-
-拉取并启动：
+仓库为公有，拉取并启动：
 
 ```bash
 ./scripts/pull_image.sh
