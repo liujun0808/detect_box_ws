@@ -79,6 +79,10 @@ RUN chmod 0755 /usr/local/bin/detect-box-sim-entrypoint \
       /opt/detect_box_ws/debug_box_position_sim \
       /tmp/ros_log \
       /tmp/matplotlib \
+      /tmp/Ultralytics \
+    && chmod 1777 \
+      /tmp/ros_log \
+      /tmp/matplotlib \
       /tmp/Ultralytics
 
 ENTRYPOINT ["/usr/local/bin/detect-box-sim-entrypoint"]

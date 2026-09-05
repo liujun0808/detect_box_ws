@@ -15,6 +15,10 @@ services:
       RMW_IMPLEMENTATION: "${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
       # Docker-bound Fast DDS must use UDP instead of same-host SHM transport.
       FASTDDS_BUILTIN_TRANSPORTS: "${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}"
+      # The container runs as the host user, so use user-creatable /tmp paths.
+      ROS_LOG_DIR: /tmp/detect_box_runtime/ros_log
+      MPLCONFIGDIR: /tmp/detect_box_runtime/matplotlib
+      YOLO_CONFIG_DIR: /tmp/detect_box_runtime/Ultralytics
     volumes:
       - ./debug_box_position_sim:/opt/detect_box_ws/debug_box_position_sim
     restart: unless-stopped

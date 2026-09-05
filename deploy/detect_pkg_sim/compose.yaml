@@ -14,6 +14,10 @@ services:
       RMW_IMPLEMENTATION: "${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
       # Avoid Fast DDS shared-memory transport across the Docker boundary.
       FASTDDS_BUILTIN_TRANSPORTS: "${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}"
+      # The container runs as the host user, so use user-creatable /tmp paths.
+      ROS_LOG_DIR: /tmp/detect_box_runtime/ros_log
+      MPLCONFIGDIR: /tmp/detect_box_runtime/matplotlib
+      YOLO_CONFIG_DIR: /tmp/detect_box_runtime/Ultralytics
     volumes:
       - ./config/box_position_estimation_sim.yaml:/opt/detect_box_ws/runtime_config/box_position_estimation_sim.yaml:ro
       - ./debug_box_position_sim:/opt/detect_box_ws/debug_box_position_sim
