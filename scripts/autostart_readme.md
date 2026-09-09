@@ -239,9 +239,9 @@ sudo systemctl restart detect_box_ws.service
 ## ROS 通信注意事项
 
 - 不要再单独启动相机节点，否则可能与检测节点争用 D435。
-- 当前脚本设置 ROS_DOMAIN_ID=22；调用 /detect 的其他 ROS 2 终端需要使用相同的 ROS_DOMAIN_ID。
+- 当前脚本设置 ROS_DOMAIN_ID=21；调用 /detect 的其他 ROS 2 终端需要使用相同的 ROS_DOMAIN_ID。
 - systemd unit 使用 `User=user`、工作目录 `/home/user/liujun/detect_box_ws`，并设置 `HOME=/home/user`。
-- systemd unit 显式使用 `ROS_DOMAIN_ID=22` 和 `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`；只有 `/home/user/dds/cyclonedds.xml` 存在时，启动脚本才会加载它。
+- systemd unit 显式使用 `ROS_DOMAIN_ID=21` 和 `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`；只有 `/home/user/dds/cyclonedds.xml` 存在时，启动脚本才会加载它。
 - 如果该 CycloneDDS 配置文件不存在，启动脚本会清除 `CYCLONEDDS_URI` 并使用 CycloneDDS 默认配置，避免因引用不存在的文件导致 `rcl node's rmw handle is invalid`。
 - ROS_LOCALHOST_ONLY=0，允许局域网内符合 ROS_DOMAIN_ID 的节点通信。
 - Restart=always 会在检测节点异常退出后等待 5 秒重启。

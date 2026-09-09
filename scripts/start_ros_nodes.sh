@@ -8,7 +8,7 @@ WS_SETUP="${WORKSPACE_DIR}/install/setup.bash"
 # interpreter in the configured Conda environment directly. Override this
 # absolute path when Conda is installed elsewhere.
 export DETECT_BOX_PYTHON="${DETECT_BOX_PYTHON:-/home/user/miniforge3/envs/detect_box/bin/python}"
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-22}"
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-21}"
 export ROS_LOCALHOST_ONLY=0
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 # Use the project-specific CycloneDDS configuration only when it is present.
