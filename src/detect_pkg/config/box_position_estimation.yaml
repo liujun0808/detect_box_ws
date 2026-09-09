@@ -33,14 +33,16 @@ detect_server_node:
     camera_reset_reconnect_timeout_ms: 10000
     camera_reset_settle_ms: 2000
 
-    # -------------------- YOLO-World --------------------
-    # 权重文件必须位于该路径；当前默认运行在 py310 环境。
-    yolo_model_path: /home/user/project/detect_box_pointcloud/detect_box_ws/models/yolov8s-worldv2.pt
+    # -------------------- YOLOE-26 文本提示实例分割 --------------------
+    # 第一阶段直接运行 PyTorch 权重，不使用 TensorRT engine。
+    yolo_model_path: /home/user/liujun/detect_box_ws/models/yoloe-26s-seg.pt
     # auto、cpu 或 cuda:0；现场 CPU 推理较慢时优先确认 CUDA 环境。
     yolo_device: auto
-    # 节点启动时加载 YOLO-World/CLIP 并执行一次预热推理，避免首次服务请求承担初始化耗时。
+    # 节点启动时加载 YOLOE-26、编码提示词并执行一次预热推理。
     yolo_startup_warmup: true
     yolo_image_size: 640
+    # CUDA 推理使用 FP16；CPU 回退时程序会自动禁用 FP16。
+    yolo_half_precision: true
     # 置信度过低会引入误检，过高会漏检；先从 0.25 附近调试。
     yolo_confidence_threshold: 0.1
     # NMS 重叠阈值；多框重叠严重时再调整。
@@ -50,7 +52,10 @@ detect_server_node:
     # 检测框太小直接拒绝，避免小噪声进入深度流程。
     yolo_min_bbox_width_px: 20
     yolo_min_bbox_height_px: 20
-    # 从上到下依次是 YOLO-World 的箱体提示词；漏检时可增加同义词。
+    # mask 概率阈值及最小实例像素面积。
+    yolo_mask_threshold: 0.5
+    yolo_min_mask_area_px: 300
+    # 从上到下依次是 YOLOE-26 的文本提示词；漏检时可增加同义词。
     yolo_class_prompts:
       - green plastic crate
       - plastic crate
@@ -73,8 +78,11 @@ detect_server_node:
     # 点云太少时先检查范围是否把箱体误删，再降低 depth_min/depth_max 限制。
     depth_min_m: 0.20
     depth_max_m: 3.00
-    # YOLO 框向四周扩张的像素数；箱体边缘缺点时增大，背景过多时减小。
+    # bbox 仅用于限制 mask 的读取范围；mask 决定哪些像素进入点云。
     depth_bbox_margin_px: 4
+    # 点云采样前向内腐蚀 mask 的像素数，减少轮廓处前景/背景混合深度。
+    # 保存和显示的实例 mask 不会被腐蚀。
+    pointcloud_mask_erosion_px: 1
     # 像素采样步长；减小可增加点数和精度，但会增加计算量。
     pointcloud_pixel_stride: 2
     # ROI 中最少有效深度点数；部分可见时可适当降低，但误检风险会上升。
@@ -148,12 +156,12 @@ detect_server_node:
     # 通过固定尺寸模型质量检查的点比例下限。
     optimizer_min_surface_inlier_ratio: 0.15
 
-    # -------------------- 原有相机到 base_link 外参 --------------------
-    # 4x4 齐次矩阵，按行展开；本方案保留原接口和原外参含义，不要改成逆矩阵。
+    # -------------------- camera2base 外参 --------------------
+    # 4x4 齐次矩阵，按行展开，表示 camera 坐标到 base_link 坐标。
     camera_to_base_row_major:
-      [0.0000, -0.342020, 0.939693, 0.12972,
+      [0.000000, -0.766044, 0.642788, 0.105590,
        -1.000000, 0.000000, 0.000000, 0.03250,
-       0.000000, -0.939693, -0.342020, 0.24561,
+       0.000000, -0.642788, -0.766044, 0.717260,
        0.000000, 0.000000, 0.000000, 1.000000]
 
     # 输出位置的 base_link 工作空间限制，超出范围直接拒绝结果，单位 m。
@@ -166,9 +174,10 @@ detect_server_node:
     # 失败时返回的 Pose：[x,y,z,qx,qy,qz,qw]；服务消息结构保持不变。
     fallback_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 
-    # 每次 /detect 请求保存一次调试快照；关闭后不写入图像和点云文件。
+    # 仅写 color_with_yoloe_mask.png 和 mask_roi_cloud.ply；仍会增加服务延迟，
+    # 生产默认关闭，现场检查 mask 时临时开启。
     debug_enabled: true
     # 快照根目录；每次请求会在这里创建一个时间命名的子目录。
-    debug_output_dir: /home/user/project/detect_box_pointcloud/detect_box_ws/debug_box_position
+    debug_output_dir: /home/user/liujun/detect_box_ws/debug_box_position
     # 只保留最近 N 次请求，按目录修改时间删除更早的快照；当前需求为 10 次。
     debug_max_snapshots: 10

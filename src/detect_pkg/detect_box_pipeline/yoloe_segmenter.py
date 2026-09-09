@@ -1,4 +1,4 @@
-"""YOLOv8-World single-crate detection."""
+"""YOLOE-26 promptable instance segmentation for one physical crate."""
 
 from __future__ import annotations
 
@@ -11,13 +11,13 @@ from typing import Any, Sequence
 import numpy as np
 
 
-class YoloWorldDetectorError(RuntimeError):
-    """Raised when the YOLO model cannot load or complete inference."""
+class YoloeSegmenterError(RuntimeError):
+    """Raised when the YOLOE model cannot load or complete inference."""
 
 
 @dataclass(frozen=True)
-class BoxDetection:
-    """Selected YOLO detection in aligned color-image coordinates."""
+class BoxSegmentation:
+    """One selected crate instance in aligned color-image coordinates."""
 
     x_min: int
     y_min: int
@@ -25,10 +25,11 @@ class BoxDetection:
     y_max: int
     confidence: float
     class_name: str
+    mask: np.ndarray
 
 
-class YoloWorldDetector:
-    """Lazily loads YOLO-World and selects one physical crate detection."""
+class YoloeSegmenter:
+    """Load YOLOE-26, apply text prompts and select one crate instance."""
 
     def __init__(
         self,
@@ -48,6 +49,9 @@ class YoloWorldDetector:
         self._max_detections = int(parameters["yolo_max_detections"])
         self._min_bbox_width_px = int(parameters["yolo_min_bbox_width_px"])
         self._min_bbox_height_px = int(parameters["yolo_min_bbox_height_px"])
+        self._mask_threshold = float(parameters["yolo_mask_threshold"])
+        self._min_mask_area_px = int(parameters["yolo_min_mask_area_px"])
+        self._half_precision = bool(parameters["yolo_half_precision"])
         self._validate_parameters()
 
         self._model: Any | None = None
@@ -68,7 +72,6 @@ class YoloWorldDetector:
 
     @property
     def resolved_device(self) -> str:
-        """Return the device passed to Ultralytics after auto resolution."""
         return self._device
 
     @property
@@ -82,12 +85,12 @@ class YoloWorldDetector:
 
     @property
     def last_inference_device(self) -> str | None:
-        """Return the tensor device observed on the last completed inference."""
         return self._last_inference_device
 
     def initialize(self, warmup: bool = True) -> None:
-        """Load YOLO-World and CLIP, optionally running one warmup inference."""
+        """Load YOLOE/text embeddings and optionally run one warmup frame."""
         model = self._load_model()
+        self._configure_cuda_backend()
         if not warmup:
             return
 
@@ -100,16 +103,19 @@ class YoloWorldDetector:
                 source=warmup_image,
                 imgsz=self._image_size,
                 device=self._device,
+                half=self._use_half_precision(),
                 max_det=self._max_detections,
                 agnostic_nms=self._agnostic_nms,
+                retina_masks=True,
                 verbose=False,
             )
         except Exception as error:
-            raise YoloWorldDetectorError(
-                f"YOLO startup warmup failed: {error}"
+            raise YoloeSegmenterError(
+                f"YOLOE-26 startup warmup failed: {error}"
             ) from error
 
-    def detect_one(self, color_bgr: Any) -> BoxDetection | None:
+    def segment_one(self, color_bgr: Any) -> BoxSegmentation | None:
+        """Return the highest-confidence valid prompted crate instance."""
         image = self._validate_image(color_bgr)
         model = self._load_model()
         try:
@@ -119,39 +125,57 @@ class YoloWorldDetector:
                 iou=self._iou_threshold,
                 imgsz=self._image_size,
                 device=self._device,
+                half=self._use_half_precision(),
                 max_det=self._max_detections,
                 agnostic_nms=self._agnostic_nms,
+                retina_masks=True,
                 verbose=False,
             )
         except Exception as error:
-            raise YoloWorldDetectorError(
-                f"YOLOv8-World inference failed: {error}"
+            raise YoloeSegmenterError(
+                f"YOLOE-26 segmentation failed: {error}"
             ) from error
 
-        if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+        if not results:
             return None
+        result = results[0]
+        if result.boxes is None or len(result.boxes) == 0:
+            return None
+        if result.masks is None or result.masks.data is None:
+            raise YoloeSegmenterError(
+                "YOLOE-26 returned boxes without instance masks"
+            )
 
-        boxes = results[0].boxes
+        boxes = result.boxes
+        masks = result.masks.data
+        if len(masks) != len(boxes):
+            raise YoloeSegmenterError(
+                "YOLOE-26 box/mask count mismatch: "
+                f"boxes={len(boxes)}, masks={len(masks)}"
+            )
         try:
             self._last_inference_device = str(boxes.xyxy.device)
         except Exception:
             self._last_inference_device = self.resolved_device_label
+
         xyxy = boxes.xyxy.detach().cpu().numpy()
         confidences = boxes.conf.detach().cpu().numpy()
         class_indices = boxes.cls.detach().cpu().numpy().astype(np.int64)
+        mask_arrays = masks.detach().cpu().numpy()
         order = np.argsort(-confidences)
         image_height, image_width = image.shape[:2]
 
         for index in order:
-            detection = self._make_detection(
+            segmentation = self._make_segmentation(
                 xyxy[index],
                 float(confidences[index]),
                 int(class_indices[index]),
+                mask_arrays[index],
                 image_width,
                 image_height,
             )
-            if detection is not None:
-                return detection
+            if segmentation is not None:
+                return segmentation
         return None
 
     def _load_model(self) -> Any:
@@ -161,29 +185,30 @@ class YoloWorldDetector:
             if self._model is not None:
                 return self._model
             if not self._model_path.is_file():
-                raise YoloWorldDetectorError(
-                    f"YOLOv8-World weights do not exist: {self._model_path}"
+                raise YoloeSegmenterError(
+                    f"YOLOE-26 weights do not exist: {self._model_path}"
                 )
             try:
-                from ultralytics import YOLOWorld
+                from ultralytics import YOLOE
 
-                model = YOLOWorld(str(self._model_path))
+                model = YOLOE(str(self._model_path))
                 model.set_classes(list(self._class_prompts))
             except Exception as error:
-                raise YoloWorldDetectorError(
-                    f"Failed to load YOLOv8-World model {self._model_path}: {error}"
+                raise YoloeSegmenterError(
+                    f"Failed to load YOLOE-26 model {self._model_path}: {error}"
                 ) from error
             self._model = model
             return model
 
-    def _make_detection(
+    def _make_segmentation(
         self,
         xyxy: np.ndarray,
         confidence: float,
         class_index: int,
+        mask: np.ndarray,
         image_width: int,
         image_height: int,
-    ) -> BoxDetection | None:
+    ) -> BoxSegmentation | None:
         if xyxy.shape != (4,) or not np.all(np.isfinite(xyxy)):
             return None
         if not math.isfinite(confidence):
@@ -200,29 +225,65 @@ class YoloWorldDetector:
             return None
         if class_index < 0 or class_index >= len(self._class_prompts):
             return None
-        return BoxDetection(
+
+        mask_array = np.asarray(mask)
+        expected_shape = (image_height, image_width)
+        if mask_array.shape != expected_shape:
+            raise YoloeSegmenterError(
+                "YOLOE-26 retina mask does not match the source image: "
+                f"mask={mask_array.shape}, image={expected_shape}"
+            )
+        if not np.all(np.isfinite(mask_array)):
+            return None
+        binary_mask = np.asarray(mask_array >= self._mask_threshold, dtype=bool)
+        binary_mask.setflags(write=False)
+        if int(np.count_nonzero(binary_mask)) < self._min_mask_area_px:
+            return None
+
+        return BoxSegmentation(
             x_min=x_min,
             y_min=y_min,
             x_max=x_max,
             y_max=y_max,
             confidence=confidence,
             class_name=self._class_prompts[class_index],
+            mask=binary_mask,
         )
+
+    def _use_half_precision(self) -> bool:
+        return self._half_precision and self.resolved_device_label != "cpu"
+
+    def _configure_cuda_backend(self) -> None:
+        """Enable stable-shape CUDA autotuning after the model is loaded."""
+        if self.resolved_device_label == "cpu":
+            return
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                # RGB-D requests always use the configured fixed input size;
+                # cuDNN benchmarking avoids repeating convolution algorithm
+                # selection on every request after the startup warmup.
+                torch.backends.cudnn.benchmark = True
+        except Exception:
+            # Device selection and inference remain handled by Ultralytics;
+            # this optional optimization must never prevent startup.
+            return
 
     @staticmethod
     def _validate_image(color_bgr: Any) -> np.ndarray:
         if not isinstance(color_bgr, np.ndarray):
-            raise YoloWorldDetectorError("YOLO input must be a NumPy image")
+            raise YoloeSegmenterError("YOLOE input must be a NumPy image")
         if color_bgr.ndim != 3 or color_bgr.shape[2] != 3:
-            raise YoloWorldDetectorError(
-                f"YOLO input must have HxWx3 shape, got {color_bgr.shape}"
+            raise YoloeSegmenterError(
+                f"YOLOE input must have HxWx3 shape, got {color_bgr.shape}"
             )
         if color_bgr.dtype != np.uint8:
-            raise YoloWorldDetectorError(
-                f"YOLO input must use uint8 BGR pixels, got {color_bgr.dtype}"
+            raise YoloeSegmenterError(
+                f"YOLOE input must use uint8 BGR pixels, got {color_bgr.dtype}"
             )
         if color_bgr.shape[0] <= 0 or color_bgr.shape[1] <= 0:
-            raise YoloWorldDetectorError("YOLO input image is empty")
+            raise YoloeSegmenterError("YOLOE input image is empty")
         return color_bgr
 
     @staticmethod
@@ -233,7 +294,9 @@ class YoloWorldDetector:
             if prompt and prompt not in prompts:
                 prompts.append(prompt)
         if not prompts:
-            raise ValueError("yolo_class_prompts must contain at least one non-empty prompt")
+            raise ValueError(
+                "yolo_class_prompts must contain at least one non-empty prompt"
+            )
         return tuple(prompts)
 
     @staticmethod
@@ -260,4 +323,8 @@ class YoloWorldDetector:
         if self._max_detections <= 0:
             raise ValueError("yolo_max_detections must be positive")
         if self._min_bbox_width_px <= 0 or self._min_bbox_height_px <= 0:
-            raise ValueError("YOLO minimum bbox dimensions must be positive")
+            raise ValueError("YOLOE minimum bbox dimensions must be positive")
+        if not 0.0 <= self._mask_threshold <= 1.0:
+            raise ValueError("yolo_mask_threshold must be in [0, 1]")
+        if self._min_mask_area_px <= 0:
+            raise ValueError("yolo_min_mask_area_px must be positive")

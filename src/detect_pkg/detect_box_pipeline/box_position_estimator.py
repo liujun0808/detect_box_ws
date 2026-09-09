@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+import cv2
 import numpy as np
 
 try:
@@ -14,6 +15,21 @@ try:
 except ImportError:  # pragma: no cover - the runtime environment should provide scipy
     least_squares = None
     cKDTree = None
+
+
+_BOX_CORNER_SIGNS = np.array(
+    [
+        [-1.0, -1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+        [-1.0, 1.0, -1.0],
+        [-1.0, 1.0, 1.0],
+        [1.0, -1.0, -1.0],
+        [1.0, -1.0, 1.0],
+        [1.0, 1.0, -1.0],
+        [1.0, 1.0, 1.0],
+    ],
+    dtype=np.float64,
+)
 
 
 class PointCloudExtractionError(RuntimeError):
@@ -30,7 +46,7 @@ class PositionEstimationError(RuntimeError):
 
 @dataclass(frozen=True)
 class CameraPointCloud:
-    """Valid depth samples from one YOLO ROI in camera coordinates."""
+    """Valid masked depth samples from one crate instance in camera coordinates."""
 
     points_camera_m: np.ndarray
     pixels_uv: np.ndarray
@@ -129,6 +145,7 @@ class BoxPositionEstimator:
         parameters: dict[str, Any],
     ) -> None:
         self.box_size_m = tuple(float(value) for value in box_size_m)
+        self._box_half_size = 0.5 * np.asarray(self.box_size_m, dtype=np.float64)
         self.camera_to_base_row_major = tuple(
             float(value) for value in camera_to_base_row_major
         )
@@ -137,6 +154,7 @@ class BoxPositionEstimator:
         self._depth_min_m = float(parameters["depth_min_m"])
         self._depth_max_m = float(parameters["depth_max_m"])
         self._bbox_margin_px = int(parameters["depth_bbox_margin_px"])
+        self._mask_erosion_px = int(parameters.get("pointcloud_mask_erosion_px", 0))
         self._pixel_stride = int(parameters["pointcloud_pixel_stride"])
         self._min_points = int(parameters["pointcloud_min_points"])
         self._sor_neighbors = int(parameters["pointcloud_statistical_neighbors"])
@@ -240,7 +258,7 @@ class BoxPositionEstimator:
         self._validate_parameters()
 
     def extract_point_cloud(self, frame: Any, detection: Any) -> CameraPointCloud:
-        """Back-project valid aligned depth pixels inside the detected bbox."""
+        """Back-project valid aligned depth pixels inside the instance mask."""
         color_height, color_width = frame.color_bgr.shape[:2]
         depth = np.asarray(frame.depth_u16)
         if depth.ndim != 2 or depth.shape != (color_height, color_width):
@@ -252,6 +270,30 @@ class BoxPositionEstimator:
             raise PointCloudExtractionError(
                 f"Invalid depth scale: {frame.depth_scale_m}"
             )
+
+        instance_mask = np.asarray(detection.mask)
+        expected_mask_shape = (color_height, color_width)
+        if instance_mask.shape != expected_mask_shape:
+            raise PointCloudExtractionError(
+                "Instance mask shape does not match the aligned RGB-D image: "
+                f"mask={instance_mask.shape}, image={expected_mask_shape}"
+            )
+        instance_mask = np.asarray(instance_mask, dtype=bool)
+        if not np.any(instance_mask):
+            raise PointCloudExtractionError("The selected crate mask is empty")
+        if self._mask_erosion_px > 0:
+            kernel_size = 2 * self._mask_erosion_px + 1
+            kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+            instance_mask = cv2.erode(
+                instance_mask.astype(np.uint8),
+                kernel,
+                iterations=1,
+            ).astype(bool)
+            if not np.any(instance_mask):
+                raise PointCloudExtractionError(
+                    "Mask erosion removed the entire crate instance; "
+                    "reduce pointcloud_mask_erosion_px"
+                )
 
         x_min = max(0, int(detection.x_min) - self._bbox_margin_px)
         y_min = max(0, int(detection.y_min) - self._bbox_margin_px)
@@ -277,16 +319,21 @@ class BoxPositionEstimator:
             )
 
         sampled_depth = depth[y_min:y_max:self._pixel_stride, x_min:x_max:self._pixel_stride]
+        sampled_mask = instance_mask[
+            y_min:y_max:self._pixel_stride,
+            x_min:x_max:self._pixel_stride,
+        ]
         depths_m = sampled_depth.astype(np.float32) * float(frame.depth_scale_m)
         valid = (
-            (sampled_depth > 0)
+            sampled_mask
+            & (sampled_depth > 0)
             & np.isfinite(depths_m)
             & (depths_m >= self._depth_min_m)
             & (depths_m <= self._depth_max_m)
         )
         if not np.any(valid):
             raise PointCloudExtractionError(
-                "No valid depth samples remained inside the detection ROI"
+                "No valid depth samples remained inside the crate mask"
             )
 
         v_grid, u_grid = np.mgrid[
@@ -303,7 +350,7 @@ class BoxPositionEstimator:
 
         if points_camera_m.shape[0] < self._min_points:
             raise PointCloudExtractionError(
-                "Not enough valid depth samples in the detection ROI: "
+                "Not enough valid depth samples in the crate mask: "
                 f"{points_camera_m.shape[0]} < {self._min_points}"
             )
         return CameraPointCloud(
@@ -377,7 +424,6 @@ class BoxPositionEstimator:
         cos_limit = math.cos(math.radians(self._inner_wall_max_normal_angle_deg))
         best_mask: np.ndarray | None = None
         best_normal: np.ndarray | None = None
-        best_offset = 0.0
         best_count = 0
         for _ in range(self._inner_wall_ransac_iterations):
             sample_indices = rng.choice(far_points.shape[0], size=3, replace=False)
@@ -400,7 +446,6 @@ class BoxPositionEstimator:
                 best_count = count
                 best_mask = mask
                 best_normal = normal
-                best_offset = offset
 
         min_inliers = max(
             3,
@@ -599,6 +644,13 @@ class BoxPositionEstimator:
         """Find connected components using a 3D Euclidean neighborhood."""
         points = np.asarray(point_cloud.points_camera_m, dtype=np.float64)
         tree = self._make_tree(points)
+        # Query all neighborhoods in one SciPy call. Calling
+        # query_ball_point once per seed repeatedly crosses the Python/C
+        # boundary and is noticeably slower on Jetson for a dense mask ROI.
+        neighbors_by_point = tree.query_ball_point(
+            points,
+            self._cluster_tolerance_m,
+        )
         visited = np.zeros(points.shape[0], dtype=bool)
         raw_clusters: list[np.ndarray] = []
 
@@ -611,10 +663,7 @@ class BoxPositionEstimator:
             while queue:
                 current = queue.pop()
                 component.append(current)
-                neighbors = tree.query_ball_point(
-                    points[current], self._cluster_tolerance_m
-                )
-                for neighbor in neighbors:
+                for neighbor in neighbors_by_point[current]:
                     if not visited[neighbor]:
                         visited[neighbor] = True
                         queue.append(neighbor)
@@ -782,7 +831,8 @@ class BoxPositionEstimator:
             )
         if metrics["bbox_iou"] < 0.05:
             raise PositionEstimationError(
-                f"Projected fixed-size model does not overlap YOLO bbox: IoU={metrics['bbox_iou']:.3f}"
+                "Projected fixed-size model does not overlap the YOLOE bbox: "
+                f"IoU={metrics['bbox_iou']:.3f}"
             )
 
         confidence = min(
@@ -922,22 +972,8 @@ class BoxPositionEstimator:
         margin = max(0.20, 2.0 * max(self.box_size_m))
         lower = points.min(axis=0) - margin
         upper = points.max(axis=0) + margin
-        half_size = 0.5 * np.asarray(self.box_size_m, dtype=np.float64)
-        signs = np.array(
-            [
-                [-1.0, -1.0, -1.0],
-                [-1.0, -1.0, 1.0],
-                [-1.0, 1.0, -1.0],
-                [-1.0, 1.0, 1.0],
-                [1.0, -1.0, -1.0],
-                [1.0, -1.0, 1.0],
-                [1.0, 1.0, -1.0],
-                [1.0, 1.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
         box_corner_offsets_camera = (
-            signs * half_size
+            _BOX_CORNER_SIGNS * self._box_half_size
         ) @ self._rotation_camera_from_box.T
         camera_z_extent = float(np.max(np.abs(box_corner_offsets_camera[:, 2])))
         # The center only needs to keep every model corner in front of the
@@ -976,11 +1012,10 @@ class BoxPositionEstimator:
         top_edge_line: TopEdgeLine | None,
     ) -> np.ndarray:
         q = self._box_local_points(points, center_camera)
-        half_size = 0.5 * np.asarray(self.box_size_m, dtype=np.float64)
         residuals = [
             math.sqrt(self._optimizer_model_weight)
             * np.maximum(
-                self._box_model_distances(q, half_size)
+                self._box_model_distances(q, self._box_half_size)
                 - self._optimizer_model_surface_tolerance_m,
                 0.0,
             )
@@ -1014,7 +1049,7 @@ class BoxPositionEstimator:
                 0.0,
                 float(
                     box_z_axis @ center_camera
-                    + half_size[2]
+                    + self._box_half_size[2]
                     - top_edge_line.top_coordinate
                     - self._optimizer_top_edge_tolerance_m
                 ),
@@ -1065,8 +1100,7 @@ class BoxPositionEstimator:
         image_size: tuple[int, int],
     ) -> dict[str, float]:
         q = self._box_local_points(points, center_camera)
-        half_size = 0.5 * np.asarray(self.box_size_m, dtype=np.float64)
-        model_distances = self._box_model_distances(q, half_size)
+        model_distances = self._box_model_distances(q, self._box_half_size)
         model_bbox = self._projected_model_bbox(
             center_camera, intrinsics, image_size
         )
@@ -1127,22 +1161,8 @@ class BoxPositionEstimator:
         image_size: tuple[int, int],
     ) -> np.ndarray:
         fx, fy, cx, cy = intrinsics
-        half_size = 0.5 * np.asarray(self.box_size_m, dtype=np.float64)
-        signs = np.array(
-            [
-                [-1.0, -1.0, -1.0],
-                [-1.0, -1.0, 1.0],
-                [-1.0, 1.0, -1.0],
-                [-1.0, 1.0, 1.0],
-                [1.0, -1.0, -1.0],
-                [1.0, -1.0, 1.0],
-                [1.0, 1.0, -1.0],
-                [1.0, 1.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
         corners_camera = center_camera + (
-            signs * half_size
+            _BOX_CORNER_SIGNS * self._box_half_size
         ) @ self._rotation_camera_from_box.T
         if np.any(corners_camera[:, 2] <= 1.0e-6):
             return np.array(
@@ -1190,6 +1210,8 @@ class BoxPositionEstimator:
             raise ValueError("depth_min_m must be positive and less than depth_max_m")
         if self._bbox_margin_px < 0:
             raise ValueError("depth_bbox_margin_px cannot be negative")
+        if self._mask_erosion_px < 0:
+            raise ValueError("pointcloud_mask_erosion_px cannot be negative")
         if self._pixel_stride <= 0:
             raise ValueError("pointcloud_pixel_stride must be positive")
         if self._min_points <= 0:

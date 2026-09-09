@@ -1,14 +1,17 @@
 # detect_pkg
 
-detect_pkg 是一个基于 ROS 2、RealSense D435 和 YOLO-World 的开口塑料箱检测与三维中心定位包。
+detect_pkg 是一个基于 ROS 2、RealSense D435 和 YOLOE-26 文本提示实例分割的开口塑料箱检测与三维中心定位包。
+
+> Jetson Orin NX 当前统一使用 Conda 环境部署。请优先阅读工作空间根目录的
+> [CONDA_YOLOE_SETUP.md](../../CONDA_YOLOE_SETUP.md)；本文中较早的 `.venv` 段落仅保留作历史兼容参考。
 
 当前方案采用服务请求触发：
 
 ~~~text
 /detect 请求
   -> RealSense SDK 获取对齐 RGB-D
-  -> YOLO-World 检测箱体
-  -> bbox 内深度反投影
+  -> YOLOE-26 根据文本提示分割完整箱体实例
+  -> mask 内有效深度反投影
   -> SOR 离群点过滤和三维聚类
   -> 远侧内壁、真实上边沿特征提取
   -> 固定尺寸箱体中心优化
@@ -27,7 +30,7 @@ detect_pkg 是一个基于 ROS 2、RealSense D435 和 YOLO-World 的开口塑料
 详细算法、公式和流程图见：
 
 ~~~text
-/home/ub/project/detect_box_ws/pointcloud_filter_and_position_optimization.md
+/home/user/liujun/detect_box_ws/pointcloud_filter_and_position_optimization.md
 ~~~
 
 ## 1. 保留接口
@@ -45,7 +48,7 @@ response: success, message, box_pose
 
 - box_pose.position 是箱体中心在 base_link 中的位置；
 - box_pose.orientation 当前使用单位四元数；
-- message 包含类别、YOLO 置信度、camera/base_link 中心、点云数量和质量指标。
+- message 包含提示词类别、分割置信度、mask 像素数、camera/base_link 中心、点云数量和质量指标。
 
 当前保留 box_pose 话题配置，默认话题名为：
 
@@ -69,7 +72,7 @@ detect_box_ws/
 │       │   ├── __init__.py
 │       │   ├── detect_server_node.py
 │       │   ├── realsense_camera.py
-│       │   ├── yolo_world_detector.py
+│       │   ├── yoloe_segmenter.py
 │       │   ├── box_position_estimator.py
 │       │   └── debug_snapshot.py
 │       ├── scripts/
@@ -78,7 +81,7 @@ detect_box_ws/
 │       └── src/
 │           └── detect_client_node.cpp
 ├── models/
-│   └── yolov8s-worldv2.pt
+│   └── yoloe-26s-seg.pt
 ├── debug_box_position/
 └── pointcloud_filter_and_position_optimization.md
 ~~~
@@ -103,7 +106,7 @@ Python 主实现位于 detect_box_pipeline 目录。scripts/detect_server_node �
 
 ### 3.2 普通 Ubuntu/PC 平台的 Python 依赖
 
-这一小节主要面向普通 Ubuntu/PC 平台，或者已经确认存在对应 Python wheel 的平台。当前 Python 主程序建议在 py310 conda 环境中运行，主要依赖：
+这一小节主要面向普通 Ubuntu/PC 平台，或者已经确认存在对应 Python wheel 的平台。项目不要求 Conda，推荐使用 Python 3.10 venv，主要依赖：
 
 ~~~text
 Python 3.10
@@ -120,23 +123,23 @@ YOLO 使用 CUDA 时，还需要安装与显卡驱动匹配的 CUDA 版 PyTorch�
 检查 Python 环境：
 
 ~~~bash
-conda activate py310
-python --version
-python -c "import torch; print(torch.cuda.is_available())"
-python -c "import pyrealsense2; print('pyrealsense2 ok')"
-python -c "import ultralytics; print('ultralytics ok')"
+.venv/bin/python --version
+.venv/bin/python -c "import torch; print(torch.cuda.is_available())"
+.venv/bin/python -c "import pyrealsense2; print('pyrealsense2 ok')"
+.venv/bin/python -c "import ultralytics; print('ultralytics ok')"
 ~~~
 
 如果缺少基础 Python 包：
 
 ~~~bash
-conda activate py310
-pip install numpy scipy opencv-python pyrealsense2 ultralytics
+.venv/bin/python -m pip install numpy scipy opencv-python pyrealsense2 ultralytics
 ~~~
 
 普通 Ubuntu/PC 平台可以根据显卡和 CUDA 版本安装 PyTorch。Jetson Orin NX 不要执行这里的通用 `pip install torch` 或直接使用 PC 的 PyTorch wheel，必须执行 3.3.3 中与 JetPack 匹配的 NVIDIA Jetson PyTorch 安装流程。
 
 ### 3.3 Jetson Orin NX 平台部署
+
+> 注意：Jetson Orin NX 的实际部署步骤已经切换为 Conda。下面早期的 `.venv` 命令仅用于历史参考；请按工作空间根目录的 `CONDA_YOLOE_SETUP.md` 执行安装、模型下载和测试。
 
 以下流程针对已经安装 JetPack 和 ROS 2 Humble 的 Jetson Orin NX。Jetson NX 不能直接套用普通 x86 Ubuntu 主机的 PyTorch 安装命令，请先确认硬件、JetPack 和 ROS 2 环境：
 
@@ -192,23 +195,23 @@ sudo rosdep init
 rosdep update
 ~~~
 
-#### 3.3.2 创建 NX 上的 py310 环境
+#### 3.3.2 创建 NX 上的 Python 环境
 
-建议在 NX 上使用支持 `aarch64` 的 Miniforge/Miniconda，然后创建与当前代码一致的 Python 3.10 环境：
+使用系统 Python 3.10 创建可访问 ROS 2、TensorRT 等系统包的虚拟环境，不需要安装 Conda：
 
 ~~~bash
-conda create -n py310 python=3.10 -y
-conda activate py310
-python -m pip install --upgrade pip
+cd /home/user/liujun/detect_box_ws
+python3 -m venv --system-site-packages .venv
+.venv/bin/python -m pip install --upgrade pip
 ~~~
 
 确认 Python 架构和版本：
 
 ~~~bash
-python -c "import platform, sys; print(platform.machine()); print(sys.executable); print(sys.version)"
+.venv/bin/python -c "import platform, sys; print(platform.machine()); print(sys.executable); print(sys.version)"
 ~~~
 
-输出的架构应为 `aarch64`，解释器应位于 NX 上实际存在的 `py310` 环境中。
+输出的架构应为 `aarch64`，解释器应为当前工作空间中的 `.venv/bin/python`。
 
 #### 3.3.3 安装 Jetson CUDA 版 PyTorch
 
@@ -218,19 +221,18 @@ Jetson 上必须安装 NVIDIA 针对 JetPack 发布的 `aarch64` PyTorch wheel�
 pip install torch
 ~~~
 
-该命令可能安装不适用于 Jetson 的通用包，或者覆盖已经正确安装的 NVIDIA 版本。请按照 NVIDIA 的 [Jetson PyTorch 安装说明](https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html)选择与 JetPack 对应的安装包，然后在 `py310` 环境中执行 NVIDIA 给出的安装命令。例如，官方文档通常要求先设置对应的 wheel 地址，再安装：
+该命令可能安装不适用于 Jetson 的通用包，或者覆盖已经正确安装的 NVIDIA 版本。请按照 NVIDIA 的 [Jetson PyTorch 安装说明](https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html)选择与 JetPack 6.2.1 对应的安装包，然后在 `.venv` 中执行 NVIDIA 给出的安装命令。例如：
 
 ~~~bash
-conda activate py310
 # 按 NVIDIA 文档中与当前 JetPack 匹配的版本填写 TORCH_INSTALL
 export TORCH_INSTALL=/absolute/path/or/url/to/jetson_pytorch_wheel.whl
-python -m pip install --no-cache-dir "${TORCH_INSTALL}"
+.venv/bin/python -m pip install --no-cache-dir "${TORCH_INSTALL}"
 ~~~
 
 安装后验证 CUDA：
 
 ~~~bash
-python - <<'PY'
+.venv/bin/python - <<'PY'
 import torch
 print("torch:", torch.__version__)
 print("cuda available:", torch.cuda.is_available())
@@ -243,19 +245,18 @@ PY
 
 #### 3.3.4 安装 Ultralytics 和 RealSense Python 接口
 
-在已经安装好 Jetson PyTorch 的同一个环境中安装其余 Python 包：
+在已经安装好 Jetson PyTorch 的同一个 `.venv` 中安装其余 Python 包：
 
 ~~~bash
-conda activate py310
-python -m pip install numpy scipy opencv-python ultralytics
-python -m pip install pyrealsense2
+.venv/bin/python -m pip install numpy scipy opencv-python ultralytics
+.venv/bin/python -m pip install pyrealsense2
 ~~~
 
 验证：
 
 ~~~bash
-python -c "import cv2, numpy, scipy, torch, ultralytics; print('python packages ok')"
-python -c "import pyrealsense2 as rs; print('pyrealsense2 ok:', rs.__file__)"
+.venv/bin/python -c "import cv2, numpy, scipy, torch, ultralytics; print('python packages ok')"
+.venv/bin/python -c "import pyrealsense2 as rs; print('pyrealsense2 ok:', rs.__file__)"
 ~~~
 
 如果 `pyrealsense2` 没有适用于当前 Jetson Python/架构的 pip wheel，需要从 librealsense 源码编译 Python binding。官方 Python binding 和 Jetson 安装说明分别见 [RealSense Python wrapper](https://github.com/IntelRealSense/librealsense/blob/master/wrappers/python/readme.md) 和 [RealSense Jetson installation](https://github.com/IntelRealSense/librealsense/blob/master/doc/installation_jetson.md)。基本流程如下：
@@ -285,21 +286,21 @@ RealSense SDK 直接由本包通过 `pyrealsense2` 获取 D435 图像，不需�
 
 #### 3.3.5 准备权重和工作空间
 
-将 `yolov8s-worldv2.pt` 放入工作空间的 `models` 目录：
+将 `yoloe-26s-seg.pt` 放入工作空间的 `models` 目录：
 
 ~~~bash
-mkdir -p /home/ub/project/detect_box_ws/models
-cp /absolute/path/to/yolov8s-worldv2.pt \
-  /home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
-ls -lh /home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
+mkdir -p /home/user/liujun/detect_box_ws/models
+cp /absolute/path/to/yoloe-26s-seg.pt \
+  /home/user/liujun/detect_box_ws/models/yoloe-26s-seg.pt
+ls -lh /home/user/liujun/detect_box_ws/models/yoloe-26s-seg.pt
 ~~~
 
-如果 NX 上的用户名或工作空间路径不是 `/home/ub/project/detect_box_ws`，需要同时修改 YAML 中的绝对路径、launch 使用的参数路径以及自启脚本中的工作空间路径。
+当前部署路径统一为 `/home/user/liujun/detect_box_ws`。如以后迁移目录，需要同时修改 YAML、ROS 可执行包装器和自启脚本中的绝对路径。
 
 #### 3.3.6 在 NX 上编译
 
 ~~~bash
-cd /home/ub/project/detect_box_ws
+cd /home/user/liujun/detect_box_ws
 source /opt/ros/humble/setup.bash
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --packages-select upper_limb_interface detect_pkg --symlink-install
@@ -318,33 +319,24 @@ source install/setup.bash
 当前 `scripts/detect_server_node` 默认尝试使用：
 
 ~~~text
-/home/ub/miniconda3/envs/py310/bin/python
+/home/user/liujun/detect_box_ws/.venv/bin/python
 ~~~
 
-NX 上如果 Miniforge/Miniconda 安装路径不同，启动前必须将 `DETECT_BOX_PYTHON` 指向实际解释器：
+启动前可以显式确认 `DETECT_BOX_PYTHON` 指向工作空间虚拟环境：
 
 ~~~bash
-conda activate py310
-export DETECT_BOX_PYTHON="$(which python)"
-cd /home/ub/project/detect_box_ws
+export DETECT_BOX_PYTHON=/home/user/liujun/detect_box_ws/.venv/bin/python
+cd /home/user/liujun/detect_box_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch detect_pkg box_position_estimation.launch.py
 ~~~
 
-也可以直接写绝对路径：
+配置 systemd 自启时不依赖交互式环境激活；`scripts/start_ros_nodes.sh` 已设置上述绝对解释器路径：
 
 ~~~bash
-export DETECT_BOX_PYTHON=/home/<nx-user>/miniforge3/envs/py310/bin/python
-~~~
-
-配置 systemd 自启时，不能依赖交互式 `conda activate`。请在 `scripts/start_ros_nodes.sh` 中、执行 `ros2 launch` 之前加入实际的 `DETECT_BOX_PYTHON` 设置，然后重新安装自启服务：
-
-~~~bash
-cd /home/ub/project/detect_box_ws
+cd /home/user/liujun/detect_box_ws
 sed -n '1,120p' scripts/start_ros_nodes.sh
-# 编辑脚本，加入：
-# export DETECT_BOX_PYTHON=/home/<nx-user>/miniforge3/envs/py310/bin/python
 ./scripts/install_autostart.sh
 sudo systemctl restart detect_box_ws.service
 ~~~
@@ -352,7 +344,7 @@ sudo systemctl restart detect_box_ws.service
 启动后应在第一次推理日志中看到：
 
 ~~~text
-YOLO actual inference device: cuda:0
+YOLOE actual inference device: cuda:0
 ~~~
 
 若显示 `cpu`，先回到 3.3.3 检查 PyTorch，不要通过修改 YAML 把 CPU 误认为 CUDA 已启用。
@@ -362,17 +354,17 @@ YOLO actual inference device: cuda:0
 前台启动：
 
 ~~~bash
-cd /home/ub/project/detect_box_ws
+cd /home/user/liujun/detect_box_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-export DETECT_BOX_PYTHON=/home/<nx-user>/miniforge3/envs/py310/bin/python
+export DETECT_BOX_PYTHON=/home/user/liujun/detect_box_ws/.venv/bin/python
 ros2 launch detect_pkg box_position_estimation.launch.py
 ~~~
 
 另开终端调用服务：
 
 ~~~bash
-cd /home/ub/project/detect_box_ws
+cd /home/user/liujun/detect_box_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 service call /detect upper_limb_interface/srv/DetectAprilTag \
@@ -392,19 +384,19 @@ tegrastats
 默认模型路径：
 
 ~~~text
-/home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
+/home/user/liujun/detect_box_ws/models/yoloe-26s-seg.pt
 ~~~
 
 检查：
 
 ~~~bash
-ls -lh /home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
+ls -lh /home/user/liujun/detect_box_ws/models/yoloe-26s-seg.pt
 ~~~
 
 如果模型路径不同，可以修改：
 
 ~~~yaml
-yolo_model_path: /absolute/path/to/yolov8s-worldv2.pt
+yolo_model_path: /absolute/path/to/yoloe-26s-seg.pt
 ~~~
 
 当前提示词为：
@@ -432,7 +424,7 @@ src/detect_pkg/config/box_position_estimation.yaml
 - RealSense 分辨率、帧率、预热和丢帧；
 - YOLO 权重、设备、输入尺寸和置信度；
 - 箱体尺寸和 box_coordinate_z_sign；
-- 深度范围和 bbox 扩张；
+- mask 阈值、mask 边缘腐蚀和深度范围；
 - SOR 与三维聚类；
 - 远侧内壁和真实上边沿 RANSAC；
 - 固定尺寸中心优化；
@@ -460,7 +452,7 @@ source /opt/ros/humble/setup.bash
 如果 upper_limb_interface 已经安装或已经 source，只构建本包：
 
 ~~~bash
-cd /home/ub/project/detect_box_ws
+cd /home/user/liujun/detect_box_ws
 colcon build --packages-select detect_pkg --symlink-install
 source install/setup.bash
 ~~~
@@ -481,7 +473,7 @@ source install/setup.bash
 在一个新终端中执行以下完整命令：
 
 ~~~bash
-cd /home/ub/project/detect_box_ws
+cd /home/user/liujun/detect_box_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch detect_pkg box_position_estimation.launch.py
@@ -510,7 +502,7 @@ ros2 run detect_pkg detect_server_node --ros-args \
 如果需要开机自动启动检测节点，执行：
 
 ~~~bash
-cd /home/ub/project/detect_box_ws
+cd /home/user/liujun/detect_box_ws
 chmod +x scripts/start_ros_nodes.sh scripts/install_autostart.sh
 ./scripts/install_autostart.sh
 ~~~
@@ -518,7 +510,7 @@ chmod +x scripts/start_ros_nodes.sh scripts/install_autostart.sh
 自启服务使用与前台启动相同的 launch 文件，不会额外启动相机节点。完整的安装、查看日志和停止方法见：
 
 ~~~text
-/home/ub/project/detect_box_ws/scripts/autostart_readme.md
+/home/user/liujun/detect_box_ws/scripts/autostart_readme.md
 ~~~
 
 ## 8. 触发检测
@@ -544,14 +536,14 @@ ros2 service type /detect
 节点第一次成功推理后会打印实际推理设备，例如：
 
 ~~~text
-YOLO actual inference device: cuda:0
+YOLOE actual inference device: cuda:0
 ~~~
 
 每次检测还会打印阶段耗时：
 
 ~~~text
 capture
-yolo
+yoloe_segment
 pointcloud_extract
 pointcloud_process
 optimizer
@@ -564,35 +556,26 @@ total
 
 ## 10. 调试输出
 
-默认开启调试保存：
+为降低单次服务延迟，生产配置默认关闭调试保存；现场验证 mask 时临时开启：
 
 ~~~yaml
-debug_enabled: true
-debug_output_dir: /home/ub/project/detect_box_ws/debug_box_position
+debug_enabled: false
+debug_output_dir: /home/user/liujun/detect_box_ws/debug_box_position
 debug_max_snapshots: 10
 ~~~
 
-每次请求创建一个时间命名目录，最多保留最近 10 次。当前保存：
+启用后，每次请求创建一个时间命名目录，最多保留最近 10 次。当前保存：
 
 ~~~text
-color_with_yolo_bbox.png
-final_candidate_cloud.ply
+color_with_yoloe_mask.png
+mask_roi_cloud.ply
 ~~~
 
-color_with_yolo_bbox.png 包含 YOLO bbox、类别名称和置信度。
+color_with_yoloe_mask.png 包含完整实例 mask 叠加、bbox、提示词类别和置信度。
 
-final_candidate_cloud.ply 使用 camera 坐标系，包含：
+mask_roi_cloud.ply 是 mask 与有效深度直接生成的原始点云，尚未经过 SOR 和三维聚类。
 
-- 最终候选箱体真实点云；
-- 一个红色顶点，表示最终估计的箱体中心。
-
-当前不保存：
-
-~~~text
-depth_u16.png
-completed_box_model_cloud.ply
-yolo_roi_cloud.ply
-~~~
+为降低请求延迟，不再计算或保存原始单色 mask、原始彩色图和最终候选点云。
 
 关闭调试保存：
 
@@ -607,7 +590,7 @@ debug_enabled: false
 检查 yolo_model_path 和模型文件：
 
 ~~~bash
-ls -lh /home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
+ls -lh /home/user/liujun/detect_box_ws/models/yoloe-26s-seg.pt
 ~~~
 
 ### YOLO 没有使用 CUDA
@@ -615,14 +598,13 @@ ls -lh /home/ub/project/detect_box_ws/models/yolov8s-worldv2.pt
 查看节点日志中的实际推理设备：
 
 ~~~text
-YOLO actual inference device
+YOLOE actual inference device
 ~~~
 
-如果显示 `cpu`，需要检查 py310 环境中的 PyTorch 是否为 CUDA 版本，以及显卡驱动是否正常：
+如果显示 `cpu`，需要检查 `.venv` 中的 PyTorch 是否为 Jetson CUDA 版本，以及 JetPack 驱动是否正常：
 
 ~~~bash
-conda activate py310
-python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+.venv/bin/python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ~~~
 
 普通 NVIDIA 主机可使用 `nvidia-smi`；Jetson NX 应优先使用 `tegrastats`，因为 Jetson 通常不提供桌面 NVIDIA 驱动中的 `nvidia-smi` 命令。
@@ -637,7 +619,7 @@ camera_reset_on_start_failure: true
 
 ### CloudCompare 看不到中心点
 
-确认加载的是最新快照中的 final_candidate_cloud.ply，并在 CloudCompare 中：
+确认加载的是最新快照中的 mask_roi_cloud.ply，并在 CloudCompare 中：
 
 1. 开启 RGB 颜色显示；
 2. 增大点显示尺寸；
@@ -648,7 +630,8 @@ camera_reset_on_start_failure: true
 
 优先检查：
 
-- color_with_yolo_bbox.png 中 bbox 是否正确；
+- color_with_yoloe_mask.png 中的 mask 是否覆盖完整箱体实例；
+- color_with_yoloe_mask.png 中 mask 与 bbox 是否正确；
 - 候选点云是否包含箱体主体；
 - surface_rmse_m；
 - surface_inlier_ratio；

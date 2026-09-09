@@ -21,9 +21,9 @@ from detect_box_pipeline.box_position_estimator import (
 )
 from detect_box_pipeline.debug_snapshot import DebugSnapshotWriter
 from detect_box_pipeline.realsense_camera import RealSenseCamera, RealSenseCameraError
-from detect_box_pipeline.yolo_world_detector import (
-    YoloWorldDetector,
-    YoloWorldDetectorError,
+from detect_box_pipeline.yoloe_segmenter import (
+    YoloeSegmenter,
+    YoloeSegmenterError,
 )
 
 
@@ -58,20 +58,22 @@ class DetectServerNode(Node):
         )
 
         self._camera = RealSenseCamera(self._camera_parameters())
-        self._detector = YoloWorldDetector(
+        self._segmenter = YoloeSegmenter(
             str(self._parameter("yolo_model_path", "")),
             class_prompts,
             self._yolo_parameters(),
         )
-        self.get_logger().info("Loading YOLO-World and CLIP model at startup...")
+        self.get_logger().info(
+            "Loading YOLOE-26 promptable segmentation model at startup..."
+        )
         try:
-            self._detector.initialize(
+            self._segmenter.initialize(
                 warmup=bool(self._parameter("yolo_startup_warmup", True))
             )
-        except YoloWorldDetectorError as error:
+        except YoloeSegmenterError as error:
             self.get_logger().error(f"Startup model initialization failed: {error}")
             raise
-        self.get_logger().info("YOLO-World startup initialization complete")
+        self.get_logger().info("YOLOE-26 startup initialization complete")
         self._estimator = BoxPositionEstimator(
             box_size,
             camera_to_base,
@@ -141,6 +143,9 @@ class DetectServerNode(Node):
             "yolo_max_detections": 10,
             "yolo_min_bbox_width_px": 20,
             "yolo_min_bbox_height_px": 20,
+            "yolo_mask_threshold": 0.5,
+            "yolo_min_mask_area_px": 300,
+            "yolo_half_precision": True,
             "yolo_startup_warmup": True,
         }
         return {
@@ -150,7 +155,7 @@ class DetectServerNode(Node):
 
     def _debug_parameters(self) -> dict[str, Any]:
         defaults = {
-            "debug_enabled": True,
+            "debug_enabled": False,
             "debug_output_dir": "debug_box_position",
             "debug_max_snapshots": 10,
         }
@@ -193,15 +198,19 @@ class DetectServerNode(Node):
             timings["capture"] = (time.perf_counter() - stage_start) * 1000.0
 
             stage_start = time.perf_counter()
-            detection = self._detector.detect_one(frame.color_bgr)
-            timings["yolo"] = (time.perf_counter() - stage_start) * 1000.0
-            if self._detector.last_inference_device is not None:
+            detection = self._segmenter.segment_one(frame.color_bgr)
+            timings["yoloe_segment"] = (
+                time.perf_counter() - stage_start
+            ) * 1000.0
+            if self._segmenter.last_inference_device is not None:
                 self.get_logger().info(
-                    "YOLO actual inference device: "
-                    f"{self._detector.last_inference_device}"
+                    "YOLOE actual inference device: "
+                    f"{self._segmenter.last_inference_device}"
                 )
             if detection is None:
-                response.message = "RGB-D capture succeeded, but YOLO found no crate"
+                response.message = (
+                    "RGB-D capture succeeded, but YOLOE found no valid crate mask"
+                )
                 return response
 
             stage_start = time.perf_counter()
@@ -228,13 +237,14 @@ class DetectServerNode(Node):
             response.message = (
                 "Box position estimation succeeded: "
                 f"class={detection.class_name}, "
-                f"confidence={detection.confidence:.3f}, "
+                f"segmentation_confidence={detection.confidence:.3f}, "
                 f"bbox=[{detection.x_min},{detection.y_min},"
                 f"{detection.x_max},{detection.y_max}], "
+                f"mask_pixels={int(detection.mask.sum())}, "
                 f"center_base={estimate.center_base_m}, "
                 f"center_camera={estimate.center_camera_m}, "
                 f"points={estimate.point_count}, "
-                f"confidence={estimate.confidence:.3f}, "
+                f"position_confidence={estimate.confidence:.3f}, "
                 f"surface_rmse_m={estimate.surface_rmse_m:.4f}, "
                 f"surface_inlier_ratio={estimate.surface_inlier_ratio:.3f}, "
                 "support_plane=disabled, "
@@ -255,7 +265,7 @@ class DetectServerNode(Node):
             return response
         except (
             RealSenseCameraError,
-            YoloWorldDetectorError,
+            YoloeSegmenterError,
             PointCloudExtractionError,
             PointCloudProcessingError,
             PositionEstimationError,
@@ -269,10 +279,9 @@ class DetectServerNode(Node):
             if frame is not None:
                 try:
                     snapshot_dir = self._debug_snapshot_writer.save(
-                        frame,
-                        detection,
-                        processing,
-                        estimate.center_camera_m if estimate is not None else None,
+                        frame=frame,
+                        detection=detection,
+                        point_cloud=point_cloud,
                     )
                     if snapshot_dir is not None:
                         self.get_logger().info(

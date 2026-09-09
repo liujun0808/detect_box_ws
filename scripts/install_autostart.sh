@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SERVICE_NAME="detect_box_ws.service"
-WORKSPACE_DIR="/home/user/project/detect_box_pointcloud/detect_box_ws"
+WORKSPACE_DIR="/home/user/liujun/detect_box_ws"
 SERVICE_SOURCE="${WORKSPACE_DIR}/scripts/${SERVICE_NAME}"
 SERVICE_TARGET="/etc/systemd/system/${SERVICE_NAME}"
 

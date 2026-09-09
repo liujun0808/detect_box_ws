@@ -4,6 +4,12 @@
 /debug_img
 /debug_box_position
 /models/*.pt
+/models/*.ts
 !/models/.gitkeep
+/mobileclip2_b.ts
+/.venv/
+/.local-cuda/
+/.ultralytics/
 /weights
 /参考ply
+/mobileclip2_b.ts

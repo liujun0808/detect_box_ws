@@ -8,15 +8,14 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=user
-WorkingDirectory=/home/user/project/detect_box_pointcloud/detect_box_ws
+WorkingDirectory=/home/user/liujun/detect_box_ws
 Environment=HOME=/home/user
 Environment=PYTHONUNBUFFERED=1
 Environment=ROS_DOMAIN_ID=22
 Environment=ROS_LOCALHOST_ONLY=0
 Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-Environment=CYCLONEDDS_URI=file:///home/user/dds/cyclonedds.xml
 ExecStartPre=/bin/sleep 5
-ExecStart=/home/user/project/detect_box_pointcloud/detect_box_ws/scripts/start_ros_nodes.sh
+ExecStart=/home/user/liujun/detect_box_ws/scripts/start_ros_nodes.sh
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

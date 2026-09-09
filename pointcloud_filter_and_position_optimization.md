@@ -1,6 +1,6 @@
 # 点云过滤与固定尺寸箱体位置优化方案
 
-本文对应当前 detect_pkg 的实际 Python ROS 2 实现，说明从 YOLO 检测框到箱体中心输出之间的点云处理、结构特征提取和固定尺寸位置优化流程。
+本文对应当前 detect_pkg 的实际 Python ROS 2 实现，说明从 YOLOE-26 实例 mask 到箱体中心输出之间的点云处理、结构特征提取和固定尺寸位置优化流程。
 
 当前方案只估计箱体中心位置，不估计箱体姿态。箱体尺寸固定，姿态只存在小幅扰动。当前不使用运动差分、传送带支撑平面或 AprilTag。
 
@@ -9,9 +9,9 @@
 ~~~text
 /detect 服务请求
   -> RealSense SDK 获取并对齐 RGB-D
-  -> YOLO-World 全图检测箱体 bbox
-  -> bbox 扩张与图像边界裁剪
-  -> 深度范围过滤
+  -> YOLOE-26 根据文本提示分割箱体实例
+  -> 选择置信度最高的有效 bbox + mask
+  -> mask 边缘腐蚀与深度范围过滤
   -> 深度反投影为 camera 点云
   -> 统计离群点过滤 SOR
   -> 3D 欧氏连通聚类
@@ -37,10 +37,10 @@
 ~~~mermaid
 flowchart TD
     A[Detect service request<br/>检测服务请求] --> B[RealSense aligned RGB-D<br/>获取并对齐 RGB-D]
-    B --> C[YOLO-World detection<br/>检测箱体]
-    C --> D[Expand and clamp bbox<br/>扩张并裁剪 bbox]
+    B --> C[YOLOE-26 segmentation<br/>文本提示实例分割]
+    C --> D[Validate and erode mask<br/>校验并内缩 mask]
     B --> D
-    D --> E[Depth range filtering<br/>深度范围过滤]
+    D --> E[Mask and depth filtering<br/>mask 与深度联合过滤]
     E --> F[Back-project to camera cloud<br/>反投影到 camera 点云]
     F --> G[SOR outlier removal<br/>统计离群点过滤]
     G --> H[3D connected clustering<br/>三维连通聚类]
@@ -131,7 +131,7 @@ $$
 rs.align(rs.stream.color)
 ~~~
 
-将深度对齐到彩色图像。YOLO bbox、深度像素和反投影内参处于同一对齐坐标系。
+将深度对齐到彩色图像。YOLOE bbox、整图 mask、深度像素和反投影内参处于同一对齐坐标系。
 
 主要相机参数：
 
@@ -146,7 +146,7 @@ camera_request_discard_frames: 5
 
 首次请求可能包含相机启动、预热、首帧等待或硬件复位时间；相机保持运行后，后续请求只执行少量丢帧和取帧。
 
-YOLO-World 使用 yolov8s-worldv2.pt 和以下提示词：
+YOLOE-26 使用 `yoloe-26s-seg.pt` 和以下文本提示词：
 
 ~~~text
 green plastic crate
@@ -157,13 +157,17 @@ green box
 plastic container
 ~~~
 
-检测框为：
+每个候选实例包含检测框和与彩色图同尺寸的布尔 mask：
 
 $$
 \mathbf{b}_{yolo}=[u_{min},v_{min},u_{max},v_{max}]^{\mathsf T}
 $$
 
-bbox 只表示图像检测范围，不等于完整箱体投影，也不直接等于箱体中心。
+$$
+M(u,v)\in\{0,1\}
+$$
+
+bbox 只用于候选选择、限制数组读取范围、优化初值和弱投影约束；只有 mask 中的像素允许生成点云。
 
 设 bbox 扩张像素为 m，图像宽高为 W、H：
 
@@ -180,6 +184,7 @@ $$
 
 ~~~yaml
 depth_bbox_margin_px: 4
+pointcloud_mask_erosion_px: 1
 depth_min_m: 0.20
 depth_max_m: 3.00
 pointcloud_pixel_stride: 2
@@ -191,10 +196,10 @@ $$
 Z(u,v)=D(u,v)s_d
 $$
 
-保留条件为：
+点云采样使用内缩后的 mask；原始完整实例 mask 仍用于调试保存。保留条件为：
 
 $$
-D(u,v)>0,\qquad
+M_{eroded}(u,v)=1,\qquad D(u,v)>0,\qquad
 0.20\leq Z(u,v)\leq 3.00
 $$
 
@@ -217,7 +222,7 @@ CameraPointCloud 同时保存三维点、像素坐标和深度值，像素坐标
 
 ## 4. 统计离群点过滤 SOR
 
-SOR 用于删除孤立飞点和深度噪声，不负责目标分割。
+SOR 用于删除 mask 点云中的孤立飞点和深度噪声；二维目标分割由 YOLOE-26 完成。
 
 对每个点查询 k 个近邻，计算平均距离：
 
@@ -524,7 +529,7 @@ optimizer_initial_seed_count: 4
 
 成功输出至少需要满足：
 
-1. YOLO 检测框有效；
+1. YOLOE-26 bbox 与实例 mask 有效；
 2. ROI 有效深度点数达到 pointcloud_min_points；
 3. SOR 后存在满足最小点数的候选簇；
 4. 优化器返回有限中心并成功收敛；
@@ -532,7 +537,7 @@ optimizer_initial_seed_count: 4
 6. base_link 中心位于输出范围；
 7. 完整候选点云 RMSE 不超过 optimizer_max_surface_rmse_m；
 8. 完整候选点云内点比例不低于 optimizer_min_surface_inlier_ratio；
-9. 固定尺寸模型投影与 YOLO bbox 存在合理重叠。
+9. 固定尺寸模型投影与 YOLOE bbox 存在合理重叠。
 
 内壁或上边沿拟合失败时，对应约束被跳过，流程仍可继续。最终质量不达标时返回失败和 fallback_pose。
 
@@ -563,41 +568,41 @@ type: upper_limb_interface/srv/DetectAprilTag
 
 ## 11. 调试输出与性能
 
-当前默认：
+为降低 `/detect` 延迟，生产配置默认关闭；现场检查 mask 时可临时开启：
 
 ~~~yaml
-debug_enabled: true
-debug_output_dir: /home/ub/project/detect_box_ws/debug_box_position
+debug_enabled: false
+debug_output_dir: /home/user/liujun/detect_box_ws/debug_box_position
 debug_max_snapshots: 10
 ~~~
 
 每次请求最多保留最近 10 个目录，包含：
 
 ~~~text
-color_with_yolo_bbox.png
-final_candidate_cloud.ply
+color_with_yoloe_mask.png
+mask_roi_cloud.ply
 ~~~
 
-彩色图包含 bbox、类别和 YOLO 置信度。PLY 使用 camera 坐标系，包含完整真实候选点云和一个追加的红色中心点。
+color_with_yoloe_mask.png 包含完整实例 mask 叠加、bbox、提示词类别和置信度；mask_roi_cloud.ply 是 mask 深度直接反投影的点云。为降低服务延迟，不再计算或保存单独的 mask 图片、原始彩色图和最终候选点云。
 
 不再保存：
 
 ~~~text
 depth_u16.png
 completed_box_model_cloud.ply
-yolo_roi_cloud.ply
 ~~~
 
-日志会打印 capture、yolo、pointcloud_extract、pointcloud_process、optimizer、pipeline、debug_snapshot 和 total。首次请求可能包含相机启动、预热、硬件复位和 YOLO CUDA 初始化；相机保持运行并完成模型 warm-up 后，后续请求明显更快。
+日志会打印 capture、yoloe_segment、pointcloud_extract、pointcloud_process、optimizer、pipeline、debug_snapshot 和 total。首次请求可能包含相机启动、预热、硬件复位和 YOLOE CUDA 初始化；相机保持运行并完成模型 warm-up 后，后续请求明显更快。
 
 ## 12. 当前限制
 
 1. 当前不处理传送带导致的箱体运动，单次请求使用一组对齐 RGB-D 完成估计。
-2. bbox 被图像边界截断时，模型投影采用弱边界覆盖约束，不能把 YOLO 框当成完整箱体框。
-3. 箱体姿态偏差过大时，固定姿态模型可能产生中心偏差或质量门控失败。
-4. 内壁和上边沿是辅助特征，拟合失败时流程仍可继续，但质量可能下降。
-5. 红色中心点是 PLY 中的额外顶点，不是完整箱体模型表面；CloudCompare 中需要开启 RGB 显示并适当增大点大小。
-6. /detect 服务串行执行，同时请求会返回已有检测请求正在运行。
+2. mask 是否覆盖开口箱体的内壁取决于模型输出；现场调试时检查 color_with_yoloe_mask.png 和 mask_roi_cloud.ply。
+3. bbox 被图像边界截断时，模型投影采用弱边界覆盖约束，不能把 YOLOE 框当成完整箱体框。
+4. 箱体姿态偏差过大时，固定姿态模型可能产生中心偏差或质量门控失败。
+5. 内壁和上边沿是辅助特征，拟合失败时流程仍可继续，但质量可能下降。
+6. 红色中心点是 PLY 中的额外顶点，不是完整箱体模型表面；CloudCompare 中需要开启 RGB 显示并适当增大点大小。
+7. /detect 服务串行执行，同时请求会返回已有检测请求正在运行。
 
 ## 13. 相关文件
 
@@ -608,8 +613,8 @@ src/detect_pkg/detect_box_pipeline/detect_server_node.py
 src/detect_pkg/detect_box_pipeline/realsense_camera.py
   RealSense SDK、RGB-D 对齐、相机预热和持续运行
 
-src/detect_pkg/detect_box_pipeline/yolo_world_detector.py
-  YOLO-World 模型、提示词和设备选择
+src/detect_pkg/detect_box_pipeline/yoloe_segmenter.py
+  YOLOE-26 模型、文本提示、实例 mask 和设备选择
 
 src/detect_pkg/detect_box_pipeline/box_position_estimator.py
   点云反投影、SOR、聚类、结构特征和中心优化
