@@ -126,12 +126,12 @@ docker run --rm --gpus all \
 每次可交付变更都使用明确版本标签，不覆盖已发布版本。以 `v0.1.0` 为例：
 
 ```bash
-docker login -u liujun0808
+docker login registry.cn-hangzhou.aliyuncs.com
 
 docker tag detect-box-sim:local \
-  liujun0808/detect_pkg_sim:v0.1.0
+  registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:v0.1.0
 
-docker push liujun0808/detect_pkg_sim:v0.1.0
+docker push registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:v0.1.0
 ```
 
 后续算法、依赖、服务接口或模型权重更新时，重新构建并递增版本，例如：
@@ -140,12 +140,33 @@ docker push liujun0808/detect_pkg_sim:v0.1.0
 ./scripts/build_sim_image.sh
 
 docker tag detect-box-sim:local \
-  liujun0808/detect_pkg_sim:v0.1.1
+  registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:v0.1.1
 
-docker push liujun0808/detect_pkg_sim:v0.1.1
+docker push registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:v0.1.1
 ```
 
-`detect-box-sim:local` 是本机构建入口标签；`liujun0808/detect_pkg_sim:vX.Y.Z` 是同一镜像用于 Docker Hub 发布的版本标签。重新构建只会更新本地标签，不会覆盖此前的发布标签。
+`detect-box-sim:local` 是本机构建入口标签；`registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:vX.Y.Z` 是同一镜像用于阿里云发布的版本标签。重新构建只会更新本地标签，不会覆盖此前的发布标签。
+
+`build_sim_image.sh` 会关闭 BuildKit 默认的 provenance/SBOM 证明清单，以兼容阿里云镜像仓库；这不影响镜像内的运行依赖或检测行为。
+
+如果已有可用镜像，不需要为清单兼容问题重新安装依赖或编译源码。可使用一个只有 `FROM` 的临时 Dockerfile 复用全部镜像层，并生成不含 provenance/SBOM 的阿里云兼容清单：
+
+```bash
+SOURCE_IMAGE=liujun0808/detect_pkg_sim:v0.1.0
+TARGET_IMAGE=registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:v0.1.0
+
+printf 'FROM %s\n' "$SOURCE_IMAGE" \
+  | docker buildx build \
+      --platform linux/amd64 \
+      --provenance=false \
+      --sbom=false \
+      --push \
+      -t "$TARGET_IMAGE" \
+      -f - \
+      .
+```
+
+若普通 `docker push` 在所有层均显示 `Pushed` 后出现 `unknown manifest class for application/vnd.oci.empty.v1+json`，表示文件系统层已上传，但最终镜像清单未发布；应使用上面的命令重写清单。详细说明见部署包 README。
 
 发布前应完成至少以下检查：
 
@@ -163,4 +184,3 @@ git diff --check
 完整的同事部署、NVIDIA Container Toolkit 安装、镜像拉取、运行参数、外部 YAML 调参、服务调用与故障排查说明，请阅读：
 
 [deploy/detect_pkg_sim/README.md](/home/ub/project/detect_box_ws/deploy/detect_pkg_sim/README.md)
-

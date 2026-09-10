@@ -10,8 +10,10 @@
 detect_pkg_sim/
 ├── README.md                              # 本说明
 ├── compose.yaml                           # 容器网络、GPU、外部参数和调试目录挂载
+├── Dockerfile.extend                      # 基于基础检测镜像进行叠加开发
+├── .dockerignore                          # 派生构建时排除凭据和调试输出
 ├── .env.example                           # 镜像版本、ROS Domain 等运行配置模板
-├── .env                                  # 本机实际配置，由用户从模板复制，不纳入版本管理
+├── .env                                   # 实际镜像配置和自动登录凭据，不纳入版本管理
 ├── config/
 │   └── box_position_estimation_sim.yaml  # 可编辑的运行参数
 ├── debug_box_position_sim/               # 自动生成的最近十次调试快照
@@ -25,7 +27,7 @@ detect_pkg_sim/
     └── call_detect_from_container.sh      # 容器内服务自检
 ```
 
-同事只需要保留整个 `detect_pkg_sim/` 目录。`config/` 和 `.env` 是本机可修改部分；更新镜像时不要覆盖已调好的本机 YAML。
+同事只需要保留整个 `detect_pkg_sim/` 目录。`config/` 和 `.env` 是本机可修改部分；更新镜像时不要覆盖已调好的本机 YAML。实际 `.env` 含私有镜像仓库登录信息，只能在授权团队内传递，不能提交到 Git 或公开发送。
 
 ## 运行原理
 
@@ -133,26 +135,27 @@ docker run --rm --gpus all \
 
 ## 拉取与启动
 
-进入部署目录，首次复制本机环境文件：
+进入发布方提供的完整部署目录：
 
 ```bash
 cd /path/to/detect_pkg_sim
-cp .env.example .env
 ```
 
 默认镜像为：
 
 ```text
-liujun0808/detect_pkg_sim:v0.1.0
+registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:v0.1.0
 ```
 
-仓库为公有，拉取并启动：
+发布方交付的实际 `.env` 已配置私有仓库账号。`pull_image.sh` 会自动通过 `--password-stdin` 登录阿里云并拉取镜像，同事不需要手动执行 `docker login`：
 
 ```bash
 ./scripts/pull_image.sh
 ./scripts/start.sh
 ./scripts/logs.sh
 ```
+
+`.env.example` 只是无密码模板。如果收到的目录中没有 `.env`，应向发布方取得准备好的实际 `.env`；只复制 `.env.example` 无法自动登录私有仓库。
 
 当日志出现以下内容时，服务已就绪：
 
@@ -222,6 +225,107 @@ config/box_position_estimation_sim.yaml
 
 YAML 模板应与镜像版本对应。算法、服务定义、Python 依赖、模型权重或镜像内默认参数变动时，需要发布新镜像版本；仅修改本机 YAML 不需要重新构建或重新拉取镜像。
 
+## 基于基础镜像叠加开发
+
+`Dockerfile.extend` 直接继承已发布的基础检测镜像。默认模板不覆盖基础镜像的 `ENTRYPOINT` 和 `CMD`，所以派生镜像仍然使用现有 `scripts/start.sh` 启动 `/detect`，无需增加另一套 Compose 或启动脚本。
+
+同事可在 `Dockerfile.extend` 中追加需要的 `RUN`、`COPY` 等指令。新增文件放在哪里由具体 `COPY` 指令决定，不强制要求建立 ROS 工作空间或 `src/` 目录。
+
+构建仅供本机运行的派生镜像：
+
+```bash
+BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:v0.1.0
+EXTENSION_IMAGE=qi-carry-box-sim-extension:local
+
+docker buildx build \
+  --platform linux/amd64 \
+  --provenance=false \
+  --sbom=false \
+  --load \
+  --build-arg BASE_IMAGE="$BASE_IMAGE" \
+  -f Dockerfile.extend \
+  -t "$EXTENSION_IMAGE" \
+  .
+```
+
+构建成功后，将 `.env` 中的镜像改为：
+
+```text
+DETECT_BOX_SIM_IMAGE=qi-carry-box-sim-extension:local
+```
+
+继续使用原命令启动检测：
+
+```bash
+./scripts/start.sh
+./scripts/logs.sh
+```
+
+派生镜像为本地标签时不要执行 `pull_image.sh`，因为该脚本用于从阿里云拉取发布镜像。需要恢复基础镜像时，把 `.env` 中的 `DETECT_BOX_SIM_IMAGE` 改回阿里云完整标签，再依次执行 `pull_image.sh` 和 `start.sh`。
+
+## 推送派生镜像
+
+需要把派生内容发布到镜像仓库时，建议在构建阶段直接关闭 provenance/SBOM 并推送：
+
+```bash
+BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:v0.1.0
+TARGET_IMAGE=registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:<新标签>
+
+docker buildx build \
+  --platform linux/amd64 \
+  --provenance=false \
+  --sbom=false \
+  --push \
+  --build-arg BASE_IMAGE="$BASE_IMAGE" \
+  -f Dockerfile.extend \
+  -t "$TARGET_IMAGE" \
+  .
+```
+
+使用明确的新标签，避免覆盖已交付的 `v0.1.0`。
+
+## 阿里云镜像清单兼容说明
+
+新版 Docker BuildKit 默认可能为镜像附加 provenance 证明清单；启用 SBOM 时还会附加 SBOM 证明。这些证明作为额外 OCI attestation manifest 挂载在镜像索引中。当前阿里云仓库对其中 `application/vnd.oci.empty.v1+json` 清单类型兼容不完整，可能在所有镜像层上传后报错：
+
+```text
+error from registry: unknown manifest class for application/vnd.oci.empty.v1+json
+```
+
+出现该错误时，前面的 `Pushed` 只表示文件系统层已经上传，最终镜像清单和标签仍未成功发布，因此 `docker pull` 仍会得到 `not found`。构建或发布时使用以下参数即可避免该问题：
+
+```text
+--provenance=false --sbom=false
+```
+
+这两个参数只关闭构建来源证明和软件物料证明，不改变镜像文件系统、CUDA/PyTorch 依赖、模型权重或检测算法行为。
+
+如果已有可用镜像，只需要重新生成兼容清单，不必重新运行 apt、pip、colcon 等耗时步骤。以下命令使用一个只有 `FROM` 的临时 Dockerfile，复用全部现有镜像层并直接推送：
+
+```bash
+SOURCE_IMAGE=liujun0808/detect_pkg_sim:v0.1.0
+TARGET_IMAGE=registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:v0.1.0
+
+printf 'FROM %s\n' "$SOURCE_IMAGE" \
+  | docker buildx build \
+      --platform linux/amd64 \
+      --provenance=false \
+      --sbom=false \
+      --push \
+      -t "$TARGET_IMAGE" \
+      -f - \
+      .
+```
+
+成功日志应包含 `pushing manifest` 且命令正常退出。随后验证远端清单：
+
+```bash
+docker manifest inspect "$TARGET_IMAGE" >/dev/null \
+  && echo "阿里云镜像清单正常"
+```
+
+Docker 官方说明：[`--provenance=false` 构建选项](https://docs.docker.com/reference/cli/docker/buildx/build/#provenance)、[Build attestations](https://docs.docker.com/build/metadata/attestations/)。
+
 ## 调试文件
 
 每个 `/detect` 请求默认在以下目录创建时间戳子目录：
@@ -245,7 +349,7 @@ final_candidate_cloud.ply
 编辑 `.env` 中的明确版本标签，例如：
 
 ```text
-DETECT_BOX_SIM_IMAGE=liujun0808/detect_pkg_sim:v0.1.1
+DETECT_BOX_SIM_IMAGE=registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:v0.1.1
 ```
 
 然后执行：
@@ -268,4 +372,3 @@ Docker 只下载本机没有的镜像层。请使用明确的 `vX.Y.Z` 标签，
 | 服务返回 `YOLO found no crate` | 查看 `color_with_yolo_bbox.png`，再调整提示词或 `yolo_confidence_threshold`。 |
 | `base_link` 位置不正确 | 核对 `camera_to_base_row_major` 是否为仿真场景的真实外参。 |
 | 无法删除调试目录 | 通过本部署包的 `scripts/start.sh` 启动，避免直接以 root 用户执行 Compose。 |
-

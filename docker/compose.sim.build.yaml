@@ -6,6 +6,11 @@ services:
       dockerfile: docker/Dockerfile.sim
       entitlements:
         - network.host
+      # Alibaba Cloud Container Registry rejects BuildKit's OCI attestation
+      # manifest. The simulation release image does not publish provenance or
+      # SBOM attestations.
+      provenance: false
+      sbom: false
       args:
         HTTP_PROXY: ${DETECT_BOX_BUILD_HTTP_PROXY:-}
         HTTPS_PROXY: ${DETECT_BOX_BUILD_HTTPS_PROXY:-}

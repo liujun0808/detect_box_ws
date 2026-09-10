@@ -1,0 +1,15 @@
+# Optional derived-image template. The base image keeps its original
+# ENTRYPOINT and CMD, so the existing scripts/start.sh still starts /detect.
+# Build with --provenance=false --sbom=false when publishing to Alibaba Cloud.
+ARG BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/keno/qi-carry-box-sim:v0.1.0
+FROM ${BASE_IMAGE}
+
+# Add any extra packages, tools, or files below when extending the image.
+# Example:
+# USER root
+# RUN apt-get update && apt-get install -y --no-install-recommends <package> \
+#     && rm -rf /var/lib/apt/lists/*
+# COPY <local-file-or-directory> /opt/custom/
+#
+# Keep the inherited ENTRYPOINT and CMD unless the /detect startup behavior is
+# intentionally being replaced.
