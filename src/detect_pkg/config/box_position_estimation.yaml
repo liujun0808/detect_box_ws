@@ -35,7 +35,7 @@ detect_server_node:
 
     # -------------------- YOLOE-26 文本提示实例分割 --------------------
     # 第一阶段直接运行 PyTorch 权重，不使用 TensorRT engine。
-    yolo_model_path: /home/user/liujun/detect_box_ws/models/yoloe-26s-seg.pt
+    yolo_model_path: /home/user/project/detect_box_ws/models/yoloe-26s-seg.pt
     # auto、cpu 或 cuda:0；现场 CPU 推理较慢时优先确认 CUDA 环境。
     yolo_device: auto
     # 节点启动时加载 YOLOE-26、编码提示词并执行一次预热推理。
@@ -43,8 +43,8 @@ detect_server_node:
     yolo_image_size: 640
     # CUDA 推理使用 FP16；CPU 回退时程序会自动禁用 FP16。
     yolo_half_precision: true
-    # 置信度过低会引入误检，过高会漏检；先从 0.25 附近调试。
-    yolo_confidence_threshold: 0.1
+    # 低置信度的大范围滚道误检约为 0.35；先用 0.55 拒绝此类结果。
+    yolo_confidence_threshold: 0.65
     # NMS 重叠阈值；多框重叠严重时再调整。
     yolo_iou_threshold: 0.45
     yolo_agnostic_nms: true
@@ -55,14 +55,10 @@ detect_server_node:
     # mask 概率阈值及最小实例像素面积。
     yolo_mask_threshold: 0.5
     yolo_min_mask_area_px: 300
-    # 从上到下依次是 YOLOE-26 的文本提示词；漏检时可增加同义词。
+    # 用箱体的敞口和镂空结构区分同色滚道；避免单靠 green/box 等宽泛词。
     yolo_class_prompts:
-      - green plastic crate
-      - plastic crate
-      - storage crate
-      - green storage box
-      - green box
-      - plastic container
+      - open plastic storage crate
+      - vented plastic crate
 
     # -------------------- 箱体先验 --------------------
     # 箱体外部尺寸，单位 m；当前 3DoF 优化不会修改这些值。
@@ -178,6 +174,6 @@ detect_server_node:
     # 生产默认关闭，现场检查 mask 时临时开启。
     debug_enabled: true
     # 快照根目录；每次请求会在这里创建一个时间命名的子目录。
-    debug_output_dir: /home/user/liujun/detect_box_ws/debug_box_position
+    debug_output_dir: /home/user/project/detect_box_ws/debug_box_position
     # 只保留最近 N 次请求，按目录修改时间删除更早的快照；当前需求为 10 次。
     debug_max_snapshots: 10

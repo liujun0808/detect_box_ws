@@ -1,25 +1,24 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-WORKSPACE_DIR="/home/user/liujun/detect_box_ws"
+WORKSPACE_DIR="/home/user/project/detect_box_ws"
 ROS_SETUP="/opt/ros/humble/setup.bash"
 WS_SETUP="${WORKSPACE_DIR}/install/setup.bash"
 # ROS launch does not require an interactive `conda activate`; use the
 # interpreter in the configured Conda environment directly. Override this
 # absolute path when Conda is installed elsewhere.
-export DETECT_BOX_PYTHON="${DETECT_BOX_PYTHON:-/home/user/miniforge3/envs/detect_box/bin/python}"
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-21}"
+export DETECT_BOX_PYTHON="${DETECT_BOX_PYTHON:-/home/user/miniconda3/envs/detect_box/bin/python}"
+export ROS_DOMAIN_ID=22
 export ROS_LOCALHOST_ONLY=0
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
-# Use the project-specific CycloneDDS configuration only when it is present.
-# A stale/missing file URI makes rmw_cyclonedds_cpp fail before rclpy can
-# create a node ("rcl node's rmw handle is invalid").
-CYCLONEDDS_CONFIG="/home/user/dds/cyclonedds.xml"
-if [[ -f "${CYCLONEDDS_CONFIG}" ]]; then
-  export CYCLONEDDS_URI="file://${CYCLONEDDS_CONFIG}"
-else
-  unset CYCLONEDDS_URI
+# Keep the CycloneDDS domain in sync with ROS_DOMAIN_ID. The older
+# /home/user/dds/cyclonedds.xml targets domain 22.
+CYCLONEDDS_CONFIG="${WORKSPACE_DIR}/scripts/cyclonedds_domain22.xml"
+if [[ ! -f "${CYCLONEDDS_CONFIG}" ]]; then
+  echo "CycloneDDS config not found: ${CYCLONEDDS_CONFIG}" >&2
+  exit 1
 fi
+export CYCLONEDDS_URI="file://${CYCLONEDDS_CONFIG}"
 
 if [[ ! -f "${ROS_SETUP}" ]]; then
   echo "ROS setup file not found: ${ROS_SETUP}" >&2
